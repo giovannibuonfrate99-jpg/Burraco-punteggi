@@ -6,7 +6,7 @@ from telegram.ext import (
     MessageHandler, ConversationHandler, filters, ContextTypes
 )
 from dotenv import load_dotenv
-from db import Database
+from database import Database
 
 load_dotenv()
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
