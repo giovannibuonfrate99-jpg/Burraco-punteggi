@@ -1,0 +1,12 @@
+{
+    "sqltools.connections": [
+        {
+            "ssh": "Disabled",
+            "previewLimit": 50,
+            "server": "localhost",
+            "driver": "PostgreSQL",
+            "name": "burraco db",
+            "connectString": "postgresql://localhost:5432/burraco_bot_db"
+        }
+    ]
+}

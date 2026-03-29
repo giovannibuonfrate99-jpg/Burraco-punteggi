@@ -1,105 +1,338 @@
 import os
 import logging
-from telegram import Update
+from datetime import datetime, timezone
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+import re
+
 from telegram.ext import (
-    Application, CommandHandler,
-    MessageHandler, ConversationHandler, filters, ContextTypes
+    Application, CommandHandler, CallbackQueryHandler, MessageHandler,
+    ContextTypes, PicklePersistence, filters,
 )
+from telegram.error import NetworkError, TimedOut
 from dotenv import load_dotenv
 from database import Database
 
 load_dotenv()
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
 logger = logging.getLogger(__name__)
 
 db = Database()
 TARGET_SCORE = int(os.getenv("TARGET_SCORE", 2000))
 
-# ── Stati ConversationHandler ──────────────────────────────────────────────────
-MANO_SCORE = 0
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPERS UI
+# ══════════════════════════════════════════════════════════════════════════════
 
-def mention(player: dict) -> str:
-    name = player.get("display_name") or player.get("players", {}).get("display_name", "?")
-    return f"*{name}*"
+def _progress_bar(score: int, target: int, width: int = 10) -> str:
+    """Barra di progresso testuale. Gestisce score negativo e target = 0."""
+    if target <= 0:
+        return "░" * width
+    pct    = max(0.0, min(1.0, score / target))
+    filled = round(pct * width)
+    return "█" * filled + "░" * (width - filled)
 
-def scoreboard_text(game_players: list, game: dict) -> str:
-    lines = [f"📊 *Punteggi — partita #{game['id']}*\n"]
+def scoreboard_text(game_players: list, game: dict, title: str | None = None) -> str:
+    header = title or f"📊 *Punteggi — partita #{game['id']}*"
+    lines  = [header + "\n"]
+    target = game["target_score"]
+    medals = ["🥇", "🥈", "🥉"]
     for i, gp in enumerate(game_players, 1):
-        name = gp["players"]["display_name"]
+        name  = gp["players"]["display_name"]
         score = gp["total_score"]
-        bar = "🥇" if i == 1 else ("🥈" if i == 2 else ("🥉" if i == 3 else f"{i}."))
-        lines.append(f"{bar} {name}: *{score}* pt")
-    lines.append(f"\n🎯 Obiettivo: {game['target_score']} pt")
+        medal = medals[i - 1] if i <= 3 else f"{i}."
+        bar   = _progress_bar(score, target)
+        pct   = max(0, min(100, round(score / target * 100))) if target > 0 else 0
+        lines.append(f"{medal} {name}: *{score}* pt\n   `{bar}` {pct}%")
+    lines.append(f"\n🎯 Obiettivo: {target} pt")
+    if game.get("status") == "paused":
+        lines.append("⏸ _Partita in pausa_")
     return "\n".join(lines)
 
-# ── /start ─────────────────────────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SESSIONE MANO  (vive in context.chat_data, persistita su disco)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _get_session(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> dict | None:
+    return context.chat_data.get(f"mano_{chat_id}")
+
+def _set_session(context: ContextTypes.DEFAULT_TYPE, chat_id: int, session: dict):
+    context.chat_data[f"mano_{chat_id}"] = session
+
+def _clear_session(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    context.chat_data.pop(f"mano_{chat_id}", None)
+
+# Chiave per l'undo in attesa di conferma
+def _undo_key(chat_id: int) -> str:
+    return f"undo_pending_{chat_id}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PANNELLO INSERIMENTO PUNTEGGI
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _panel_text(session: dict) -> str:
+    lines = ["🃏 *Inserimento punteggi mano*\n"]
+    for pid in session["players"]:
+        name  = session["players_info"][pid]
+        score = session["scored"].get(pid)
+        if score is None:
+            lines.append(f"• {name}: _da inserire_")
+        else:
+            sign = "+" if score >= 0 else ""
+            lines.append(f"• {name}: `{sign}{score}` ✓")
+    all_done = all(v is not None for v in session["scored"].values())
+    if all_done:
+        lines.append("\n✅ Tutti inseriti! Premi *Conferma e salva*.")
+    else:
+        lines.append("\nPremi ✏️ accanto al tuo nome per inserire il punteggio.")
+    return "\n".join(lines)
+
+def _panel_keyboard(session: dict) -> InlineKeyboardMarkup:
+    rows = []
+    for pid in session["players"]:
+        name  = session["players_info"][pid]
+        score = session["scored"].get(pid)
+        sign  = "+" if (score is not None and score >= 0) else ""
+        label = f"✏️ {name}" if score is None else f"✏️ {name}: {sign}{score}"
+        rows.append([InlineKeyboardButton(label, callback_data=f"mp:edit:{pid}")])
+
+    all_done = all(v is not None for v in session["scored"].values())
+    if all_done:
+        rows.append([InlineKeyboardButton("✅ Conferma e salva", callback_data="mp:save_all")])
+
+    rows.append([
+        InlineKeyboardButton("📜 Storico",    callback_data="mp:history"),
+        InlineKeyboardButton("❌ Annulla mano", callback_data="mp:cancel_all"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# INSERIMENTO PUNTEGGIO  (testo libero via tastiera reale)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _input_text(session: dict) -> str:
+    pid      = session["editing_pid"]
+    name     = session["players_info"][pid]
+    existing = session["scored"].get(pid)
+    hint     = f"\nValore attuale: `{existing:+}`" if existing is not None else ""
+    return (
+        f"🃏 *Punteggio per {name}*{hint}\n\n"
+        f"✏️ Scrivi il punteggio con la tastiera e invialo\n"
+        f"_(numero intero, es. `300` oppure `-150`)_"
+    )
+
+def _input_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("↩ Indietro",    callback_data="mp:back_panel"),
+        InlineKeyboardButton("❌ Annulla mano", callback_data="mp:cancel_all"),
+    ]])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STORICO MANI  (async: fa query al DB)
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def _build_history_text(game_id: int, pids: list, players_info: dict) -> str:
+    hands = await db.get_hands_history(game_id)
+    if not hands:
+        return "📜 *Storico mani*\n\n_Nessuna mano registrata ancora._"
+
+    lines   = ["📜 *Storico mani*\n"]
+    display = hands
+
+    if len(hands) > 20:
+        lines.append(f"_(ultime 20 di {len(hands)} mani)_\n")
+        display = hands[-20:]
+
+    for hand in display:
+        scores_map = {hs["player_id"]: hs["punteggio_mano"] for hs in hand["hand_scores"]}
+        parts = []
+        for pid in pids:
+            s    = scores_map.get(pid, 0)
+            sign = "+" if s >= 0 else ""
+            parts.append(f"{players_info[pid][:6]}: {sign}{s}")
+        lines.append(f"*#{hand['hand_number']}* — " + " | ".join(parts))
+
+    return "\n".join(lines)
+
+def _history_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("↩ Torna al pannello", callback_data="mp:back_panel")
+    ]])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STATISTICHE FINALI
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def _build_final_stats(game: dict, players_info: dict) -> str:
+    """
+    Genera il blocco statistiche da appendere al riepilogo finale.
+    Gestisce il caso 'nessuna mano' (partita terminata manualmente prima di giocare).
+    """
+    hands = await db.get_hands_history(game["id"])
+    if not hands:
+        return ""
+
+    total_hands   = len(hands)
+    player_scores: dict[int, list[int]] = {}
+    best_score:  int | None = None
+    best_player: str = ""
+    worst_score: int | None = None
+    worst_player: str = ""
+
+    for hand in hands:
+        for hs in hand["hand_scores"]:
+            pid   = hs["player_id"]
+            score = hs["punteggio_mano"]
+            player_scores.setdefault(pid, []).append(score)
+            if best_score is None or score > best_score:
+                best_score  = score
+                best_player = players_info.get(pid, "?")
+            if worst_score is None or score < worst_score:
+                worst_score  = score
+                worst_player = players_info.get(pid, "?")
+
+    # Durata partita
+    try:
+        created = datetime.fromisoformat(str(game["created_at"]).replace("Z", "+00:00"))
+        now     = datetime.now(timezone.utc)
+        delta   = now - created
+        hours, remainder = divmod(int(delta.total_seconds()), 3600)
+        minutes = remainder // 60
+        duration_str = f"{hours}h {minutes}m" if hours else f"{minutes}m"
+    except Exception:
+        duration_str = "N/D"
+
+    lines = [
+        "\n📈 *Statistiche partita*",
+        f"⏱ Durata: *{duration_str}*  |  Mani totali: *{total_hands}*\n",
+        "*Media punti per mano:*",
+    ]
+    for pid, scores in player_scores.items():
+        name = players_info.get(pid, "?")
+        avg  = sum(scores) / len(scores)
+        sign = "+" if avg >= 0 else ""
+        lines.append(f"  • {name}: {sign}{avg:.1f} pt/mano")
+
+    if best_score is not None:
+        sign = "+" if best_score >= 0 else ""
+        lines.append(f"\n🔥 Mano migliore: *{best_player}* ({sign}{best_score} pt)")
+    if worst_score is not None:
+        lines.append(f"💀 Mano peggiore: *{worst_player}* ({worst_score:+} pt)")
+
+    return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# /start
+# ══════════════════════════════════════════════════════════════════════════════
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    db.register_player(user.id, user.username, user.first_name)
+    await db.register_player(user.id, user.username, user.first_name)
     await update.message.reply_text(
         f"🃏 *Bot Burraco* — Benvenuto, {user.first_name}!\n\n"
-        "Comandi principali:\n"
-        "• /nuovapartita — crea una partita in questo gruppo\n"
+        "Comandi:\n"
+        "• /nuovapartita [punti] — crea una partita (es. /nuovapartita 3000)\n"
         "• /unisciti — entra nella partita in corso\n"
         "• /inizia — avvia la partita (almeno 2 giocatori)\n"
         "• /mano — registra i punteggi di una mano\n"
         "• /punteggi — mostra il tabellone\n"
+        "• /storico — storico di tutte le mani\n"
+        "• /annullamano — annulla l'ultima mano registrata\n"
+        "• /pausa — metti la partita in pausa\n"
+        "• /riprendi — riprendi una partita in pausa\n"
         "• /classifica — classifica globale 🏆\n"
-        "• /finegioco — termina e inchiona il vincitore\n",
+        "• /finegioco — termina e incorona il vincitore\n",
         parse_mode="Markdown",
     )
 
-# ── /nuovapartita ──────────────────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# /nuovapartita [target_score]
+# ══════════════════════════════════════════════════════════════════════════════
 
 async def cmd_nuova_partita(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
-    db.register_player(user.id, user.username, user.first_name)
+    await db.register_player(user.id, user.username, user.first_name)
 
-    existing = db.get_active_game(chat.id)
+    # Parsing argomento opzionale per il target
+    target = TARGET_SCORE
+    if context.args:
+        try:
+            target = int(context.args[0])
+            if target <= 0 or target > 99_999:
+                await update.message.reply_text(
+                    "❌ Il punteggio obiettivo deve essere tra 1 e 99.999.\n"
+                    "Esempio: /nuovapartita 3000"
+                )
+                return
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Argomento non valido. Usa un numero intero.\n"
+                "Esempio: /nuovapartita 3000"
+            )
+            return
+
+    existing = await db.get_active_game(chat.id)
     if existing:
+        status_label = {"waiting": "in attesa", "active": "in corso", "paused": "in pausa"}.get(
+            existing["status"], existing["status"]
+        )
         await update.message.reply_text(
-            "⚠️ C'è già una partita in corso in questo gruppo!\n"
+            f"⚠️ C'è già una partita *{status_label}* in questo gruppo!\n"
             "Usa /finegioco per terminarla prima di crearne una nuova.",
             parse_mode="Markdown",
         )
         return
 
-    game = db.create_game(chat.id, chat.title, user.id, TARGET_SCORE)
-    db.add_player_to_game(game["id"], user.id)
+    game = await db.create_game(chat.id, chat.title, user.id, target)
+    await db.add_player_to_game(game["id"], user.id)
     await update.message.reply_text(
         f"✅ Nuova partita creata da *{user.first_name}*!\n\n"
-        f"🎯 Obiettivo: *{TARGET_SCORE}* punti\n\n"
+        f"🎯 Obiettivo: *{target}* punti\n\n"
         f"Gli altri giocatori usino /unisciti per entrare.\n"
         f"Quando siete tutti pronti, usa /inizia.",
         parse_mode="Markdown",
     )
 
-# ── /unisciti ──────────────────────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# /unisciti
+# ══════════════════════════════════════════════════════════════════════════════
 
 async def cmd_unisciti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
-    db.register_player(user.id, user.username, user.first_name)
+    await db.register_player(user.id, user.username, user.first_name)
 
-    game = db.get_active_game(chat.id)
+    game = await db.get_active_game(chat.id)
     if not game:
         await update.message.reply_text("❌ Nessuna partita in corso. Usa /nuovapartita per crearne una.")
         return
     if game["status"] == "active":
         await update.message.reply_text("⚠️ La partita è già iniziata, non puoi più unirti.")
         return
+    if game["status"] == "paused":
+        await update.message.reply_text("⚠️ La partita è in pausa e già iniziata, non puoi unirti.")
+        return
 
-    added = db.add_player_to_game(game["id"], user.id)
+    added = await db.add_player_to_game(game["id"], user.id)
     if not added:
         await update.message.reply_text(f"ℹ️ Sei già iscritto alla partita, {user.first_name}!")
         return
 
-    players = db.get_game_players(game["id"])
-    names = [p["players"]["display_name"] for p in players]
+    players = await db.get_game_players(game["id"])
+    names   = [p["players"]["display_name"] for p in players]
     await update.message.reply_text(
         f"👋 *{user.first_name}* si è unito/a!\n\n"
         f"Giocatori ({len(names)}): {', '.join(names)}\n"
@@ -107,29 +340,37 @@ async def cmd_unisciti(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
     )
 
-# ── /inizia ────────────────────────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# /inizia
+# ══════════════════════════════════════════════════════════════════════════════
 
 async def cmd_inizia(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
 
-    game = db.get_active_game(chat.id)
+    game = await db.get_active_game(chat.id)
     if not game:
         await update.message.reply_text("❌ Nessuna partita in attesa. Usa /nuovapartita.")
         return
     if game["status"] == "active":
         await update.message.reply_text("⚠️ La partita è già in corso!")
         return
+    if game["status"] == "paused":
+        await update.message.reply_text("⚠️ La partita è in pausa. Usa /riprendi per continuare.")
+        return
     if game["created_by"] != user.id:
         await update.message.reply_text("❌ Solo chi ha creato la partita può avviarla.")
         return
 
-    players = db.get_game_players(game["id"])
+    players = await db.get_game_players(game["id"])
     if len(players) < 2:
-        await update.message.reply_text("⚠️ Servono almeno *2 giocatori* per iniziare!", parse_mode="Markdown")
+        await update.message.reply_text(
+            "⚠️ Servono almeno *2 giocatori* per iniziare!", parse_mode="Markdown"
+        )
         return
 
-    db.start_game(game["id"])
+    await db.start_game(game["id"])
     names = [p["players"]["display_name"] for p in players]
     await update.message.reply_text(
         f"🎴 *La partita è iniziata!*\n\n"
@@ -139,133 +380,466 @@ async def cmd_inizia(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
     )
 
-# ── /mano (ConversationHandler) ────────────────────────────────────────────────
 
-async def cmd_mano_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ══════════════════════════════════════════════════════════════════════════════
+# /mano
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def cmd_mano(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
-    game = db.get_active_game(chat.id)
-    if not game or game["status"] != "active":
+
+    if _get_session(context, chat.id):
+        await update.message.reply_text(
+            "⚠️ C'è già una mano in corso! Completala o annullala prima."
+        )
+        return
+
+    game = await db.get_active_game(chat.id)
+    if not game:
         await update.message.reply_text("❌ Nessuna partita attiva. Usa /nuovapartita.")
-        return ConversationHandler.END
+        return
+    if game["status"] == "paused":
+        await update.message.reply_text("⏸ La partita è in pausa. Usa /riprendi per continuare.")
+        return
+    if game["status"] != "active":
+        await update.message.reply_text("❌ Nessuna partita attiva. Usa /nuovapartita.")
+        return
 
-    players = db.get_game_players(game["id"])
+    players = await db.get_game_players(game["id"])
     if not players:
-        await update.message.reply_text("❌ Nessun giocatore in questa partita.")
-        return ConversationHandler.END
+        await update.message.reply_text("❌ Nessun giocatore nella partita.")
+        return
 
-    hand = db.create_hand(game["id"])
-    context.chat_data["current_hand"] = hand
-    context.chat_data["game"] = game
-    context.chat_data["players_to_score"] = [p["player_id"] for p in players]
-    context.chat_data["players_info"] = {p["player_id"]: p["players"]["display_name"] for p in players}
-    context.chat_data["scored"] = {}
-    context.chat_data["current_idx"] = 0
+    pids    = [p["player_id"] for p in players]
+    session = {
+        "game":         game,
+        "players":      pids,
+        "players_info": {p["player_id"]: p["players"]["display_name"] for p in players},
+        "scored":       {pid: None for pid in pids},
+        "state":        "panel",
+        "editing_pid":  None,
+        "input":        "",
+        "msg_id":       None,
+    }
+    _set_session(context, chat.id, session)
 
-    await _ask_score(update.message, context)
-    return MANO_SCORE
-
-async def _ask_score(msg, context: ContextTypes.DEFAULT_TYPE):
-    idx = context.chat_data["current_idx"]
-    players_to_score = context.chat_data["players_to_score"]
-    players_info = context.chat_data["players_info"]
-    hand = context.chat_data["current_hand"]
-    total = len(players_to_score)
-
-    pid = players_to_score[idx]
-    name = players_info[pid]
-    context.chat_data["current_player_id"] = pid
-
-    await msg.reply_text(
-        f"🃏 *Mano #{hand['hand_number']}* — {idx+1}/{total}\n\n"
-        f"👤 *{name}* — punteggio della mano? (può essere negativo, es. -50)",
+    msg = await update.message.reply_text(
+        _panel_text(session),
+        reply_markup=_panel_keyboard(session),
         parse_mode="Markdown",
     )
+    session["msg_id"] = msg.message_id
+    _set_session(context, chat.id, session)
 
-async def mano_score(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CALLBACK TASTIERA MANO  (pattern "^mp:")
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def numpad_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query   = update.callback_query
+    chat_id = query.message.chat_id
+    session = _get_session(context, chat_id)
+
+    if not session or query.message.message_id != session.get("msg_id"):
+        await query.answer("Questa tastiera non è più attiva.", show_alert=True)
+        return
+
+    await query.answer()
+    action = query.data[len("mp:"):]
+    state  = session.get("state", "panel")
+
+    # ── Azioni disponibili in qualunque stato ─────────────────────────────
+
+    if action == "cancel_all":
+        _clear_session(context, chat_id)
+        await query.edit_message_text(
+            "❌ Mano annullata. I punteggi *non* sono stati salvati.\n"
+            "Usa /mano quando siete pronti.",
+            parse_mode="Markdown",
+        )
+        return
+
+    if action == "back_panel":
+        # Funziona sia da 'editing' che da 'history'
+        session["state"]       = "panel"
+        session["editing_pid"] = None
+        session["input"]       = ""
+        _set_session(context, chat_id, session)
+        await query.edit_message_text(
+            _panel_text(session),
+            reply_markup=_panel_keyboard(session),
+            parse_mode="Markdown",
+        )
+        return
+
+    # ── Stato PANEL ───────────────────────────────────────────────────────
+
+    if state == "panel":
+
+        if action.startswith("edit:"):
+            pid = int(action[len("edit:"):])
+            session["state"]       = "editing"
+            session["editing_pid"] = pid
+            session["input"]       = ""
+            _set_session(context, chat_id, session)
+            await query.edit_message_text(
+                _input_text(session),
+                reply_markup=_input_keyboard(),
+                parse_mode="Markdown",
+            )
+            return
+
+        if action == "save_all":
+            if not all(v is not None for v in session["scored"].values()):
+                await query.answer("Non tutti i punteggi sono stati inseriti!", show_alert=True)
+                return
+            recap = await _commit_hand_and_recap(session, session["game"])
+            _clear_session(context, chat_id)
+            await query.edit_message_text(recap, parse_mode="Markdown")
+            return
+
+        if action == "history":
+            session["state"] = "history"
+            _set_session(context, chat_id, session)
+            text = await _build_history_text(
+                session["game"]["id"],
+                session["players"],
+                session["players_info"],
+            )
+            await query.edit_message_text(
+                text,
+                reply_markup=_history_keyboard(),
+                parse_mode="Markdown",
+            )
+            return
+
+    # ── Stato EDITING ─────────────────────────────────────────────────────
+    # L'input viene gestito da text_score_handler (MessageHandler).
+    # Qui arrivano solo back_panel e cancel_all, già gestiti sopra.
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HANDLER TESTO  — raccoglie il numero digitato dall'utente
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def text_score_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Intercetta i messaggi di testo quando una sessione è in stato 'editing'."""
+    chat_id = update.effective_chat.id
+    session = _get_session(context, chat_id)
+
+    # Ignora se non c'è una sessione attiva in fase di editing
+    if not session or session.get("state") != "editing":
+        return
+
+    raw = update.message.text.strip()
+
+    # Prova a cancellare il messaggio dell'utente per tenere la chat pulita
     try:
-        punteggio = int(update.message.text.strip())
-    except ValueError:
-        await update.message.reply_text("⚠️ Inserisci un numero intero (es. 250 oppure -50).")
-        return MANO_SCORE
+        await update.message.delete()
+    except Exception:
+        pass
 
-    pid   = context.chat_data["current_player_id"]
-    hand  = context.chat_data["current_hand"]
-    game  = context.chat_data["game"]
-    name  = context.chat_data["players_info"][pid]
+    # Validazione: numero intero opzionalmente preceduto da -
+    if not re.fullmatch(r"-?\d{1,6}", raw):
+        # Manda un alert temporaneo rispondendo e poi eliminando subito
+        err = await context.bot.send_message(
+            chat_id=chat_id,
+            text="⚠️ Inserisci solo un numero intero (es. `300` o `-150`).",
+            parse_mode="Markdown",
+        )
+        context.job_queue.run_once(
+            lambda ctx: ctx.bot.delete_message(chat_id, err.message_id),
+            when=3,
+        )
+        return
 
-    db.save_hand_score(hand["id"], pid, {"punteggio_mano": punteggio})
-    new_total = db.update_player_score(game["id"], pid, punteggio)
-    context.chat_data["scored"][pid] = punteggio
+    value = int(raw)
+    pid   = session["editing_pid"]
+    session["scored"][pid] = value
+    session["state"]       = "panel"
+    session["editing_pid"] = None
+    session["input"]       = ""
+    _set_session(context, chat_id, session)
 
-    sign = "+" if punteggio >= 0 else ""
-    await update.message.reply_text(
-        f"✅ *{name}*: {sign}{punteggio} pt → totale *{new_total}* pt",
-        parse_mode="Markdown",
-    )
+    # Aggiorna il messaggio del pannello principale
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=session["msg_id"],
+            text=_panel_text(session),
+            reply_markup=_panel_keyboard(session),
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        logger.warning(f"Impossibile aggiornare il pannello: {e}")
 
-    context.chat_data["current_idx"] += 1
-    if context.chat_data["current_idx"] < len(context.chat_data["players_to_score"]):
-        await _ask_score(update.message, context)
-        return MANO_SCORE
-    else:
-        await _finish_hand(update.message, context)
-        return ConversationHandler.END
 
-async def _finish_hand(msg, context: ContextTypes.DEFAULT_TYPE):
-    game         = context.chat_data["game"]
-    hand         = context.chat_data["current_hand"]
-    scored       = context.chat_data["scored"]
-    players_info = context.chat_data["players_info"]
+# ══════════════════════════════════════════════════════════════════════════════
+# COMMIT MANO + RIEPILOGO
+# ══════════════════════════════════════════════════════════════════════════════
 
-    players = db.get_game_players(game["id"])
-    lines = [f"🏁 *Riepilogo Mano #{hand['hand_number']}*\n"]
+async def _commit_hand_and_recap(session: dict, game: dict) -> str:
+    scored       = session["scored"]
+    players_info = session["players_info"]
+
+    hand    = await db.save_full_hand(game["id"], scored)
+    for pid, punteggio in scored.items():
+        await db.update_player_score(game["id"], pid, punteggio)
+
+    players = await db.get_game_players(game["id"])
+    target  = game["target_score"]
+    lines   = [f"🏁 *Riepilogo Mano #{hand['hand_number']}*\n"]
+
     for p in players:
         pid   = p["player_id"]
         name  = players_info.get(pid, "?")
         delta = scored.get(pid, 0)
         total = p["total_score"]
         sign  = "+" if delta >= 0 else ""
-        lines.append(f"• {name}: {sign}{delta} pt → *{total}* pt totali")
+        bar   = _progress_bar(total, target)
+        pct   = max(0, min(100, round(total / target * 100))) if target > 0 else 0
+        lines.append(f"• {name}: {sign}{delta} pt → *{total}* pt\n  `{bar}` {pct}%")
 
-    winner = next((p for p in players if p["total_score"] >= game["target_score"]), None)
-    text = "\n".join(lines)
+    winner = next((p for p in players if p["total_score"] >= target), None)
+    text   = "\n".join(lines)
 
     if winner:
-        wname = winner["players"]["display_name"]
-        text += f"\n\n🏆 *{wname} ha raggiunto {game['target_score']} punti e vince la partita!*"
-        db.finish_game(game["id"], winner["player_id"])
-        text += "\n\nUsa /nuovapartita per una nuova sfida!"
+        wname        = winner["players"]["display_name"]
+        winfo        = {p["player_id"]: p["players"]["display_name"] for p in players}
+        final_stats  = await _build_final_stats(game, winfo)
+        text += (
+            f"\n\n🏆 *{wname} ha raggiunto {target} punti e vince la partita!*"
+            f"{final_stats}"
+            f"\n\nUsa /nuovapartita per una nuova sfida!"
+        )
+        await db.finish_game(game["id"], winner["player_id"])
     else:
         text += "\n\nUsa /mano per la prossima mano."
 
-    await msg.reply_text(text, parse_mode="Markdown")
+    return text
 
-async def mano_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Inserimento punteggi annullato.")
-    return ConversationHandler.END
 
-# ── /punteggi ──────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# /storico  (comando standalone)
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def cmd_storico(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+
+    game = await db.get_active_game(chat.id)
+    if not game or game["status"] not in ("active", "paused"):
+        await update.message.reply_text("❌ Nessuna partita attiva o in pausa.")
+        return
+
+    players = await db.get_game_players(game["id"])
+    if not players:
+        await update.message.reply_text("❌ Nessun giocatore nella partita.")
+        return
+
+    pids         = [p["player_id"] for p in players]
+    players_info = {p["player_id"]: p["players"]["display_name"] for p in players}
+    text         = await _build_history_text(game["id"], pids, players_info)
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# /annullamano  — mostra anteprima + conferma
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def cmd_annulla_mano(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+
+    # Non si può annullare mentre una sessione di inserimento è aperta
+    if _get_session(context, chat.id):
+        await update.message.reply_text(
+            "⚠️ C'è una mano in corso.\n"
+            "Prima completa o annulla la mano attiva con ❌."
+        )
+        return
+
+    game = await db.get_active_game(chat.id)
+    # Permettiamo l'undo anche su partite 'finished' (es. undo dopo vittoria accidentale)
+    # ma non su 'waiting' (non ha senso) — in quel caso get_active_game ritorna il gioco
+    # in waiting, quindi lo blocchiamo esplicitamente.
+    if not game:
+        await update.message.reply_text("❌ Nessuna partita attiva.")
+        return
+    if game["status"] == "waiting":
+        await update.message.reply_text("❌ La partita non è ancora iniziata, nessuna mano da annullare.")
+        return
+
+    hand, scores = await db.get_last_hand(game["id"])
+    if not hand:
+        await update.message.reply_text("❌ Nessuna mano da annullare in questa partita.")
+        return
+
+    # Recupera i nomi dei giocatori per l'anteprima
+    players      = await db.get_game_players(game["id"])
+    players_info = {p["player_id"]: p["players"]["display_name"] for p in players}
+
+    lines = [f"⚠️ Vuoi annullare la *Mano #{hand['hand_number']}*?\n"]
+    for s in scores:
+        name = players_info.get(s["player_id"], "?")
+        sign = "+" if s["punteggio_mano"] >= 0 else ""
+        lines.append(f"• {name}: {sign}{s['punteggio_mano']} pt (verrà sottratto)")
+
+    if game["status"] == "finished":
+        lines.append("\n_Nota: la partita risulta conclusa. L'undo la riporterà in corso._")
+
+    # Salva l'hand_id atteso per evitare race condition (doppio clic, annullo concorrente)
+    context.chat_data[_undo_key(chat.id)] = hand["id"]
+
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Sì, annulla mano", callback_data="undo:confirm"),
+        InlineKeyboardButton("❌ No",               callback_data="undo:cancel"),
+    ]])
+    await update.message.reply_text(
+        "\n".join(lines),
+        reply_markup=keyboard,
+        parse_mode="Markdown",
+    )
+
+
+# CALLBACK UNDO  (pattern "^undo:")
+async def undo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query   = update.callback_query
+    chat_id = query.message.chat_id
+    await query.answer()
+
+    action = query.data[len("undo:"):]
+
+    if action == "cancel":
+        context.chat_data.pop(_undo_key(chat_id), None)
+        await query.edit_message_text("↩ Annullamento annullato. La mano rimane.")
+        return
+
+    if action == "confirm":
+        expected_hand_id = context.chat_data.pop(_undo_key(chat_id), None)
+        if expected_hand_id is None:
+            # La richiesta è scaduta (ad es. il bot è stato riavviato nel mezzo)
+            await query.edit_message_text(
+                "❌ Richiesta scaduta. Riprova con /annullamano."
+            )
+            return
+
+        game = await db.get_active_game(chat_id)
+        # Recuperiamo anche partite 'finished' (undo può riattivare una partita conclusa)
+        if not game:
+            # Cerca tra le partite finished del gruppo
+            await query.edit_message_text("❌ Nessuna partita trovata. Riprova con /annullamano.")
+            return
+
+        success = await db.undo_last_hand(game["id"], expected_hand_id)
+        if not success:
+            await query.edit_message_text(
+                "⚠️ La situazione è cambiata (mano già annullata o nuova mano aggiunta).\n"
+                "Riprova con /annullamano."
+            )
+            return
+
+        # Mostra il tabellone aggiornato
+        players = await db.get_game_players(game["id"])
+        # Rilegge il gioco per avere lo status aggiornato (potrebbe essere tornato 'active')
+        game = await db.get_active_game(chat_id)
+        text = "✅ *Ultima mano annullata!*\n\n"
+        if players and game:
+            text += scoreboard_text(players, game)
+        await query.edit_message_text(text, parse_mode="Markdown")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# /pausa  e  /riprendi
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def cmd_pausa(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    chat = update.effective_chat
+
+    game = await db.get_active_game(chat.id)
+    if not game:
+        await update.message.reply_text("❌ Nessuna partita attiva.")
+        return
+    if game["status"] == "waiting":
+        await update.message.reply_text("⚠️ La partita non è ancora iniziata.")
+        return
+    if game["status"] == "paused":
+        await update.message.reply_text("⏸ La partita è già in pausa. Usa /riprendi per continuare.")
+        return
+    if game["created_by"] != user.id:
+        await update.message.reply_text("❌ Solo chi ha creato la partita può metterla in pausa.")
+        return
+
+    # Blocca se c'è una sessione di inserimento aperta
+    if _get_session(context, chat.id):
+        await update.message.reply_text(
+            "⚠️ C'è una mano in corso.\n"
+            "Completa o annulla la mano attiva prima di mettere in pausa."
+        )
+        return
+
+    await db.pause_game(game["id"])
+    await update.message.reply_text(
+        "⏸ *Partita messa in pausa.*\n\n"
+        "I punteggi sono al sicuro. Usa /riprendi quando siete pronti.",
+        parse_mode="Markdown",
+    )
+
+
+async def cmd_riprendi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    chat = update.effective_chat
+
+    game = await db.get_active_game(chat.id)
+    if not game:
+        await update.message.reply_text("❌ Nessuna partita trovata.")
+        return
+    if game["status"] != "paused":
+        status_label = {"waiting": "in attesa", "active": "già in corso"}.get(
+            game["status"], game["status"]
+        )
+        await update.message.reply_text(f"⚠️ La partita è {status_label}, non in pausa.")
+        return
+    if game["created_by"] != user.id:
+        await update.message.reply_text("❌ Solo chi ha creato la partita può riprenderla.")
+        return
+
+    await db.resume_game(game["id"])
+    players  = await db.get_game_players(game["id"])
+    # Aggiorna lo status nel dict locale per scoreboard_text
+    game_resumed = {**game, "status": "active"}
+    text = "▶️ *Partita ripresa!*\n\n" + scoreboard_text(players, game_resumed)
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# /punteggi
+# ══════════════════════════════════════════════════════════════════════════════
 
 async def cmd_punteggi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
-    game = db.get_active_game(chat.id)
-    if not game or game["status"] != "active":
+    game = await db.get_active_game(chat.id)
+    if not game or game["status"] not in ("active", "paused"):
         await update.message.reply_text("❌ Nessuna partita attiva.")
         return
-    players = db.get_game_players(game["id"])
+    players = await db.get_game_players(game["id"])
     if not players:
         await update.message.reply_text("Nessun giocatore nella partita.")
         return
     await update.message.reply_text(scoreboard_text(players, game), parse_mode="Markdown")
 
-# ── /classifica ────────────────────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# /classifica
+# ══════════════════════════════════════════════════════════════════════════════
 
 async def cmd_classifica(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    rows = db.get_classifica_globale()
+    rows = await db.get_classifica_globale()
     if not rows:
         await update.message.reply_text("Nessuna partita conclusa ancora! 🃏")
         return
-    lines = ["🏆 *Classifica Globale*\n"]
+    lines  = ["🏆 *Classifica Globale*\n"]
     medals = ["🥇", "🥈", "🥉"]
     for i, row in enumerate(rows):
         medal = medals[i] if i < 3 else f"{i+1}."
@@ -276,12 +850,16 @@ async def cmd_classifica(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
-# ── /finegioco ─────────────────────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# /finegioco
+# ══════════════════════════════════════════════════════════════════════════════
 
 async def cmd_finegioco(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
-    game = db.get_active_game(chat.id)
+
+    game = await db.get_active_game(chat.id)
     if not game:
         await update.message.reply_text("❌ Nessuna partita attiva da terminare.")
         return
@@ -289,48 +867,93 @@ async def cmd_finegioco(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Solo chi ha creato la partita può terminarla.")
         return
 
-    players = db.get_game_players(game["id"])
+    _clear_session(context, chat.id)
+    context.chat_data.pop(_undo_key(chat.id), None)  # pulisce eventuale undo pending
+
+    players = await db.get_game_players(game["id"])
     if not players:
-        db.finish_game(game["id"], user.id)
+        await db.finish_game(game["id"], user.id)
         await update.message.reply_text("Partita terminata.")
         return
 
-    winner = max(players, key=lambda p: p["total_score"])
-    db.finish_game(game["id"], winner["player_id"])
+    winner       = max(players, key=lambda p: p["total_score"])
+    players_info = {p["player_id"]: p["players"]["display_name"] for p in players}
+    await db.finish_game(game["id"], winner["player_id"])
 
     lines = [f"🏁 *Partita #{game['id']} terminata!*\n"]
     for i, p in enumerate(players, 1):
-        lines.append(f"{i}. {p['players']['display_name']}: *{p['total_score']}* pt")
+        name  = p["players"]["display_name"]
+        score = p["total_score"]
+        bar   = _progress_bar(score, game["target_score"])
+        lines.append(f"{i}. {name}: *{score}* pt  `{bar}`")
     lines.append(f"\n🏆 Vincitore: *{winner['players']['display_name']}*!")
 
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    final_stats = await _build_final_stats(game, players_info)
+    text = "\n".join(lines) + final_stats + "\n\nUsa /nuovapartita per una nuova sfida!"
+    await update.message.reply_text(text, parse_mode="Markdown")
 
-# ── Main ───────────────────────────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ERROR HANDLER
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    if isinstance(context.error, (NetworkError, TimedOut)):
+        logger.warning(f"Errore di rete transitorio (ignorato): {context.error}")
+        return
+    logger.error("Eccezione non gestita:", exc_info=context.error)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# POST-INIT  (connessione Supabase prima del polling)
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def post_init(application: Application) -> None:
+    await db.connect()
+    logger.info("Database Supabase inizializzato.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN
+# ══════════════════════════════════════════════════════════════════════════════
 
 def main():
     token = os.environ["TELEGRAM_TOKEN"]
-    app = Application.builder().token(token).build()
 
-    mano_conv = ConversationHandler(
-        entry_points=[CommandHandler("mano", cmd_mano_start)],
-        states={
-            MANO_SCORE: [MessageHandler(filters.TEXT & ~filters.COMMAND, mano_score)],
-        },
-        fallbacks=[CommandHandler("annulla", mano_cancel)],
-        per_chat=True,
+    persistence = PicklePersistence(filepath="burraco_bot_data.pkl")
+
+    app = (
+        Application.builder()
+        .token(token)
+        .persistence(persistence)
+        .post_init(post_init)
+        .read_timeout(30)
+        .write_timeout(30)
+        .connect_timeout(15)
+        .pool_timeout(30)
+        .build()
     )
 
-    app.add_handler(CommandHandler("start",         cmd_start))
-    app.add_handler(CommandHandler("nuovapartita",  cmd_nuova_partita))
-    app.add_handler(CommandHandler("unisciti",      cmd_unisciti))
-    app.add_handler(CommandHandler("inizia",        cmd_inizia))
-    app.add_handler(mano_conv)
-    app.add_handler(CommandHandler("punteggi",      cmd_punteggi))
-    app.add_handler(CommandHandler("classifica",    cmd_classifica))
-    app.add_handler(CommandHandler("finegioco",     cmd_finegioco))
+    app.add_handler(CommandHandler("start",        cmd_start))
+    app.add_handler(CommandHandler("nuovapartita", cmd_nuova_partita))
+    app.add_handler(CommandHandler("unisciti",     cmd_unisciti))
+    app.add_handler(CommandHandler("inizia",       cmd_inizia))
+    app.add_handler(CommandHandler("mano",         cmd_mano))
+    app.add_handler(CommandHandler("punteggi",     cmd_punteggi))
+    app.add_handler(CommandHandler("storico",      cmd_storico))
+    app.add_handler(CommandHandler("annullamano",  cmd_annulla_mano))
+    app.add_handler(CommandHandler("pausa",        cmd_pausa))
+    app.add_handler(CommandHandler("riprendi",     cmd_riprendi))
+    app.add_handler(CommandHandler("classifica",   cmd_classifica))
+    app.add_handler(CommandHandler("finegioco",    cmd_finegioco))
+    app.add_handler(CallbackQueryHandler(numpad_callback, pattern="^mp:"))
+    app.add_handler(CallbackQueryHandler(undo_callback,   pattern="^undo:"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_score_handler))
+    app.add_error_handler(error_handler)
 
     logger.info("🃏 Bot Burraco avviato!")
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling(drop_pending_updates=True, timeout=30)
+
 
 if __name__ == "__main__":
     main()
