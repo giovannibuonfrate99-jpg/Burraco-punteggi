@@ -13,8 +13,6 @@ from telegram.ext import (
 from telegram.error import NetworkError, TimedOut
 from dotenv import load_dotenv
 from database import Database
-from fastapi import FastAPI, Request
-import uvicorn
 
 load_dotenv()
 logging.basicConfig(
@@ -1116,11 +1114,16 @@ async def post_init(application: Application) -> None:
 def main():
     token = os.environ["TELEGRAM_TOKEN"]
     port = int(os.getenv("PORT", 8000))
-    base_url = os.getenv("BASE_URL", f"http://localhost:{port}")
+    
+    # Render fornisce automaticamente RENDER_EXTERNAL_URL (es: https://burraco-bot.onrender.com)
+    base_url = os.getenv("RENDER_EXTERNAL_URL", "")
+    if not base_url:
+        # Fallback se non in Render (local dev)
+        base_url = f"http://localhost:{port}"
 
     persistence = PicklePersistence(filepath="burraco_bot_data.pkl")
 
-    tg_app = (
+    app = (
         Application.builder()
         .token(token)
         .persistence(persistence)
@@ -1132,47 +1135,34 @@ def main():
         .build()
     )
 
-    tg_app.add_handler(CommandHandler("start",        cmd_start))
-    tg_app.add_handler(CommandHandler("nuovapartita", cmd_nuova_partita))
-    tg_app.add_handler(CommandHandler("unisciti",     cmd_unisciti))
-    tg_app.add_handler(CommandHandler("inizia",       cmd_inizia))
-    tg_app.add_handler(CommandHandler("mano",         cmd_mano))
-    tg_app.add_handler(CommandHandler("punteggi",     cmd_punteggi))
-    tg_app.add_handler(CommandHandler("storico",      cmd_storico))
-    tg_app.add_handler(CommandHandler("annullamano",  cmd_annulla_mano))
-    tg_app.add_handler(CommandHandler("pausa",        cmd_pausa))
-    tg_app.add_handler(CommandHandler("riprendi",     cmd_riprendi))
-    tg_app.add_handler(CommandHandler("classifica",   cmd_classifica))
-    tg_app.add_handler(CommandHandler("finegioco",    cmd_finegioco))
-    tg_app.add_handler(CallbackQueryHandler(numpad_callback, pattern="^mp:"))
-    tg_app.add_handler(CallbackQueryHandler(undo_callback,   pattern="^undo:"))
-    tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_score_handler))
-    tg_app.add_error_handler(error_handler)
-
-    # ══════════════════════════════════════════════════════════════════════════════
-    # WEBHOOK MODE - FastAPI server
-    # ══════════════════════════════════════════════════════════════════════════════
-    web_app = FastAPI(title="Burraco Bot Webhook")
-
-    @web_app.post("/webhook")
-    async def webhook(request: Request):
-        """Riceve gli aggiornamenti da Telegram via webhook."""
-        data = await request.json()
-        update = Update.de_json(data, tg_app.bot)
-        await tg_app.process_update(update)
-        return {"ok": True}
-
-    @web_app.get("/health")
-    async def health():
-        """Health check per Render."""
-        return {"status": "ok", "bot": "running"}
+    app.add_handler(CommandHandler("start",        cmd_start))
+    app.add_handler(CommandHandler("nuovapartita", cmd_nuova_partita))
+    app.add_handler(CommandHandler("unisciti",     cmd_unisciti))
+    app.add_handler(CommandHandler("inizia",       cmd_inizia))
+    app.add_handler(CommandHandler("mano",         cmd_mano))
+    app.add_handler(CommandHandler("punteggi",     cmd_punteggi))
+    app.add_handler(CommandHandler("storico",      cmd_storico))
+    app.add_handler(CommandHandler("annullamano",  cmd_annulla_mano))
+    app.add_handler(CommandHandler("pausa",        cmd_pausa))
+    app.add_handler(CommandHandler("riprendi",     cmd_riprendi))
+    app.add_handler(CommandHandler("classifica",   cmd_classifica))
+    app.add_handler(CommandHandler("finegioco",    cmd_finegioco))
+    app.add_handler(CallbackQueryHandler(numpad_callback, pattern="^mp:"))
+    app.add_handler(CallbackQueryHandler(undo_callback,   pattern="^undo:"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_score_handler))
+    app.add_error_handler(error_handler)
 
     logger.info(f"🃏 Bot Burraco avviato in webhook mode")
     logger.info(f"   Porta: {port}")
-    logger.info(f"   Webhook URL: {base_url}/webhook (sarà configurato automaticamente)")
+    logger.info(f"   Webhook URL: {base_url}/webhook")
     
-    # Avvia il server avec uvicorn
-    uvicorn.run(web_app, host="0.0.0.0", port=port, log_level="info")
+    # Avvia in webhook mode (Starlette server built-in)
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path="/webhook",
+        webhook_url=f"{base_url}/webhook"
+    )
 
 
 if __name__ == "__main__":

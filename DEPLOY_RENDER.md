@@ -92,7 +92,7 @@ Compila il form come segue:
 
 | Campo | Valore | Note |
 |-------|--------|------|
-| **Name** | `burraco-bot` | Slug per URL (non usato per il bot, ma required) |
+| **Name** | `burraco-bot` | Slug per URL (è il nome del servizio su Render) |
 | **Environment** | `Docker` | 🔑 **IMPORTANTE**: seleziona Docker (non Python direct) |
 | **Region** | `Frankfurt` (o altra EU) | Più vicino = latenza migliore |
 | **Branch** | `main` | Deploy automatico su push |
@@ -102,6 +102,11 @@ Compila il form come segue:
 | Campo | Valore |
 |-------|--------|
 | **Auto-deploy** | ✅ **ON** (rideploy automatico su git push) |
+
+**IMPORTANTE**: Niente da aggiungere per servire su una porta - il bot lo fa automaticamente!
+- il bot ascolterà sulla porta 8000 (Render la vede automaticamente)
+- Il webhook URL viene configurato automaticamente usando RENDER_EXTERNAL_URL
+- Render fornisce questa variabile automaticamente quando il servizio è online
 
 ---
 
@@ -159,25 +164,28 @@ Environment Variables
 ```
 Building Docker image...
 Provisioning container...
-Running: uvicorn bot:web_app --host 0.0.0.0 --port 8000
-✅ Web Service disponibile
-🌐 L'app è online su https://burraco-bot.onrender.com
+Running: python bot.py
+✅ Web Service available at: https://burraco-bot.onrender.com
 ```
 
 **⏳ Tempo atteso**: 2-5 minuti per il primo deploy
 
 **Output atteso nel log** (vedi da Render Dashboard → Logs):
 ```
-> uvicorn bot:web_app ...
 ✅ Configurazione d'ambiente validata
 ✅ Connesso a Supabase
 🃏 Bot Burraco avviato in webhook mode
    Porta: 8000
    Webhook URL: https://burraco-bot.onrender.com/webhook
-Uvicorn running on http://0.0.0.0:8000
+✅ Webhook impostato automaticamente
 ```
 
-Il webhook viene configurato automaticamente dal bot all'avvio!
+**ℹ️ Come funziona adesso:**
+- Il bot ascolterà su <span style="text-decoration: underline">https://burraco-bot.onrender.com/webhook</span>
+- Render fornisce automaticamente la variabile `RENDER_EXTERNAL_URL`
+- Il bot configura il webhook automaticamente all'avvio
+- **Non fare manualmente nulla** - tutto è automatico!
+- Telegram invia i messaggi via HTTPS direttamente al webhook URL
 
 ---
 
@@ -269,38 +277,53 @@ git push origin main
 # O controlla logs per leak/crash
 ```
 
-### ⚠️ "Webhook not working / Invalid token"
+### ⚠️ "Webhook not working / Invalid token" o vedi `getUpdates` nei logs
 
 **Cosa significa:**
-Il webhook di Telegram non riesce a contattare il tuo servizio, di solito causa token errato o URL non raggiungibile.
+Il webhook non è stato configurato correttamente o il token è errato.
+
+**Come riconoscerlo:**
+Se vedi nei logs:
+- ❌ `getUpdates` (parametri di polling) → webhook non attivo
+- ❌ `deleteWebhook` senza poi `setWebhook` → initialization fallita
+- ✅ `Webhook URL: https://burraco-bot.onrender.com/webhook` → OK
 
 **Soluzione step-by-step:**
 
-1. **Controlla i logs Render**:
+1. **Controlla i logs Render in dettaglio**:
    ```
    Dashboard → burraco-bot → Logs
    ```
-   Ricerca (`Cmd+F`) per:
-   - ❌ "Invalid token" → TELEGRAM_TOKEN non corretto
-   - ❌ "HTTP 401" → credenziali errate
-   - ✅ "Webhook URL: https://burraco-bot.onrender.com/webhook" → OK
+   Ricerca per:
+   - "Bot Burraco avviato in webhook mode" → OK se presente
+   - "Webhook URL: https://..." → OK se ha URL giusto
+   - Errori Telegram API → problema di token o network
 
-2. **Verifica il TELEGRAM_TOKEN**:
-   - Vai su @BotFather su Telegram
+2. **Verifica il TELEGRAM_TOKEN sia corretto**:
+   - Vai su Telegram → @BotFather
    - `/mybots` → seleziona il tuo bot
-   - Copia il token
+   - Copia il token esatto
    - Compara con quello in Render dashboard → Settings → Environment
+   - Se diverso, aggiorna e salva (auto-redeploy)
 
-3. **Se il token è corretto** ma ancora non funziona:
-   - Attendi 1-2 minuti dopo il deploy (il webhook ha un delay)
-   - Riavvia il servizio: Dashboard → burraco-bot → Settings → "Restart" button
-   - Invia di nuovo `/start` al bot su Telegram
+3. **Se ancora non funziona - fai un restart manuale**:
+   - Dashboard → burraco-bot → Settings
+   - Scorri fino a "Restart instance"
+   - Click "Restart"
+   - Attendi lo start e guarda i logs
 
-4. **Ultimo resort: Rigenera il token**:
+4. **Ultimo resort - rigenera il TELEGRAM_TOKEN**:
    - @BotFather → `/mybots` → tuo bot → `/revoke`
-   - `/newtoken` per generare uno nuovo
-   - Aggiorna Render env var
-   - Redeploy (push qualcosa a GitHub o manuale restart)
+   - `/start` con @BotFather
+   - `/newbot` (oppure se vuoi lo stesso bot) → `/newtoken`
+   - Copia nuovo token
+   - Aggiorna su Render env var
+   - Render auto-redeploy
+
+**Cosa NON fare:**
+- ❌ Non usare Background Worker (solo se vuoi pagare)
+- ❌ Non aggiungere FastAPI/uvicorn (Application.run_webhook è già built-in)
+- ❌ Non settare manualmente il webhook di Telegram (il bot lo fa automaticamente)
 
 ---
 
