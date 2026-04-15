@@ -1,0 +1,45 @@
+# Burraco Bot — Dependency Pinning
+# Generated from pip freeze — production environment
+# Last updated: 2026-04-15
+
+# Core messaging & async
+python-telegram-bot==22.6
+python-dotenv==1.2.2
+
+# Database & async HTTP
+supabase==2.28.2
+supabase-auth==2.28.2
+supabase-functions==2.28.2
+postgrest==2.28.2
+storage3==2.28.2
+realtime==2.28.2
+
+# HTTP & async utilities
+httpx==0.28.1
+httpcore==1.0.9
+anyio==4.12.1
+h11==0.16.0
+h2==4.3.0
+hpack==4.1.0
+hyperframe==6.1.0
+
+# Data validation & typing
+pydantic==2.12.5
+pydantic_core==2.41.5
+annotated-types==0.7.0
+typing_extensions==4.15.0
+typing-inspection==0.4.2
+
+# Utilities
+requests==2.32.5
+certifi==2026.2.25
+urllib3==2.6.3
+charset-normalizer==3.4.6
+idna==3.11
+click==8.3.1
+PyJWT==2.12.1
+cryptography==46.0.5
+cffi==2.0.0
+pycparser==3.0
+tenacity==9.1.4
+websockets==15.0.1

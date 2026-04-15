@@ -59,3 +59,29 @@ LEFT JOIN game_players gp ON gp.player_id = p.telegram_id
 LEFT JOIN games g ON g.id = gp.game_id AND g.status = 'finished'
 GROUP BY p.telegram_id, p.display_name
 ORDER BY vittorie DESC, media_punti DESC;
+
+-- ═════════════════════════════════════════════════════════════════════════════
+-- RPC: Aggiorna punteggio in modo atomico (anti-race-condition)
+-- ═════════════════════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION update_score_atomic(
+    p_game_id INTEGER,
+    p_player_id BIGINT,
+    p_delta INTEGER
+) RETURNS INTEGER AS $$
+DECLARE
+    v_new_score INTEGER;
+BEGIN
+    -- UPDATE atomico: incrementa il punteggio direttamente nel DB
+    UPDATE game_players
+    SET total_score = total_score + p_delta
+    WHERE game_id = p_game_id AND player_id = p_player_id
+    RETURNING total_score INTO v_new_score;
+    
+    -- Se nessuna riga è stata aggiornata, significa che il giocatore non esiste
+    IF v_new_score IS NULL THEN
+        RAISE EXCEPTION 'Giocatore non trovato in questa partita';
+    END IF;
+    
+    RETURN v_new_score;
+END;
+$$ LANGUAGE plpgsql;

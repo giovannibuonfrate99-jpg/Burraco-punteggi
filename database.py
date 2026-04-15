@@ -149,23 +149,39 @@ class Database:
         return bool(res.data)
 
     async def update_player_score(self, game_id: int, player_id: int, delta: int) -> int:
-        cur = await (
-            self.client.table("game_players")
-            .select("total_score")
-            .eq("game_id", game_id)
-            .eq("player_id", player_id)
-            .limit(1)
-            .execute()
-        )
-        new_score = ((cur.data[0]["total_score"] or 0) if cur.data else 0) + delta
-        await (
-            self.client.table("game_players")
-            .update({"total_score": new_score})
-            .eq("game_id", game_id)
-            .eq("player_id", player_id)
-            .execute()
-        )
-        return new_score
+        """
+        Aggiorna il punteggio di un giocatore IN MODO ATOMICO usando RPC PostgreSQL.
+        Questo evita race condition che potrebbero causare perdita di punti con concorrenza.
+        
+        Args:
+            game_id: ID della partita
+            player_id: ID del giocatore (telegram_id)
+            delta: Differenza da aggiungere (positiva o negativa)
+        
+        Returns:
+            Il nuovo punteggio totale del giocatore
+        
+        Raises:
+            Exception: Se il giocatore non è in questa partita
+        """
+        try:
+            # Usa l'RPC PostgreSQL atomico per UPDATE thread-safe
+            result = await self.client.rpc(
+                "update_score_atomic",
+                {
+                    "p_game_id": game_id,
+                    "p_player_id": player_id,
+                    "p_delta": delta,
+                }
+            ).execute()
+            
+            if not result.data:
+                raise ValueError(f"Impossibile aggiornare punteggio per player {player_id} in game {game_id}")
+            
+            return result.data
+        except Exception as e:
+            self.logger.error(f"Errore in update_player_score: {e}")
+            raise
 
     # ── Mani ──────────────────────────────────────────────────────────────
 
@@ -184,20 +200,37 @@ class Database:
         """
         Crea la mano e salva tutti i punteggi in un colpo solo.
         Chiamato SOLO quando tutti i giocatori hanno confermato.
+        
+        Raises:
+            RuntimeError: Se l'operazione fallisce a Supabase
         """
-        hand_number = await self.next_hand_number(game_id)
-        hand_res = await (
-            self.client.table("hands")
-            .insert({"game_id": game_id, "hand_number": hand_number})
-            .execute()
-        )
-        hand = hand_res.data[0]
-        rows = [
-            {"hand_id": hand["id"], "player_id": pid, "punteggio_mano": punteggio}
-            for pid, punteggio in scored.items()
-        ]
-        await self.client.table("hand_scores").insert(rows).execute()
-        return hand
+        try:
+            hand_number = await self.next_hand_number(game_id)
+            hand_res = await (
+                self.client.table("hands")
+                .insert({"game_id": game_id, "hand_number": hand_number})
+                .execute()
+            )
+            
+            if not hand_res.data:
+                raise ValueError("Impossibile creare la mano nel database")
+            
+            hand = hand_res.data[0]
+            rows = [
+                {"hand_id": hand["id"], "player_id": pid, "punteggio_mano": punteggio}
+                for pid, punteggio in scored.items()
+            ]
+            
+            scores_res = await self.client.table("hand_scores").insert(rows).execute()
+            if not scores_res.data:
+                raise ValueError("Impossibile salvare i punteggi della mano")
+            
+            self.logger.info(f"✅ Mano #{hand_number} salvata: {len(rows)} punteggi registrati")
+            return hand
+            
+        except Exception as e:
+            self.logger.error(f"❌ Errore nel salvataggio della mano: {e}", exc_info=True)
+            raise RuntimeError(f"Errore di salvataggio: {str(e)}") from e
 
     async def get_last_hand(self, game_id: int) -> tuple[dict | None, list]:
         """
@@ -229,51 +262,65 @@ class Database:
         - Sottrae i punteggi da game_players
         - Cancella hand_scores e hand
         - Se il gioco era 'finished', lo riporta ad 'active' (rimuove vincitore)
-        Ritorna True se l'undo è avvenuto, False se la mano non esiste più.
+        
+        Ritorna True se l'undo è avvenuto, False se la mano non esiste più o errore.
         """
-        hand, scores = await self.get_last_hand(game_id)
-        if not hand or hand["id"] != expected_hand_id:
-            return False  # qualcuno ha già annullato o aggiunto una nuova mano
+        try:
+            hand, scores = await self.get_last_hand(game_id)
+            if not hand or hand["id"] != expected_hand_id:
+                self.logger.warning(
+                    f"Undo fallito: mano non trovata o già annullata (expected_id={expected_hand_id})"
+                )
+                return False
 
-        # Sottrai i punteggi di questa mano dai totali dei giocatori
-        for score_row in scores:
-            await self.update_player_score(
-                game_id, score_row["player_id"], -score_row["punteggio_mano"]
-            )
+            # Sottrai i punteggi di questa mano dai totali dei giocatori
+            for score_row in scores:
+                try:
+                    await self.update_player_score(
+                        game_id, score_row["player_id"], -score_row["punteggio_mano"]
+                    )
+                except Exception as e:
+                    self.logger.error(f"Errore nel revert dei punteggi per player {score_row['player_id']}: {e}")
+                    raise
 
-        # Cancella i punteggi della mano (prima, per FK)
-        await (
-            self.client.table("hand_scores")
-            .delete()
-            .eq("hand_id", hand["id"])
-            .execute()
-        )
-
-        # Cancella la mano
-        await (
-            self.client.table("hands")
-            .delete()
-            .eq("id", hand["id"])
-            .execute()
-        )
-
-        # Se il gioco era già concluso, riportalo ad 'active'
-        game_res = await (
-            self.client.table("games")
-            .select("status")
-            .eq("id", game_id)
-            .limit(1)
-            .execute()
-        )
-        if game_res.data and game_res.data[0]["status"] == "finished":
+            # Cancella i punteggi della mano (prima, per FK)
             await (
-                self.client.table("games")
-                .update({"status": "active", "winner_id": None, "finished_at": None})
-                .eq("id", game_id)
+                self.client.table("hand_scores")
+                .delete()
+                .eq("hand_id", hand["id"])
                 .execute()
             )
 
-        return True
+            # Cancella la mano
+            await (
+                self.client.table("hands")
+                .delete()
+                .eq("id", hand["id"])
+                .execute()
+            )
+
+            # Se il gioco era già concluso, riportalo ad 'active'
+            game_res = await (
+                self.client.table("games")
+                .select("status")
+                .eq("id", game_id)
+                .limit(1)
+                .execute()
+            )
+            if game_res.data and game_res.data[0]["status"] == "finished":
+                await (
+                    self.client.table("games")
+                    .update({"status": "active", "winner_id": None, "finished_at": None})
+                    .eq("id", game_id)
+                    .execute()
+                )
+
+            self.logger.info(f"✅ Mano (ID={expected_hand_id}) annullata con successo")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"❌ Errore nell'undo della mano: {e}", exc_info=True)
+            return False
 
     async def get_hands_history(self, game_id: int):
         res = await (

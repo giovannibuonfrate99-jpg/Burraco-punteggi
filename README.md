@@ -3,80 +3,211 @@
 Bot Telegram per gestire partite di Burraco in modalità **tutti contro tutti**.
 Calcola punteggi, tiene lo storico delle mani e una classifica globale.
 
+**Status**: 🚀 Production-ready | **Python**: 3.14+ | **License**: MIT
+
 ---
 
-## 🛠️ Sviluppo e utilizzo sul tuo PC
+## 🚀 Avvio rapido (Locally)
 
-### 1. Prerequisiti
-- **Python**: Assicurati di avere Python installato.
-- **PostgreSQL**: Devi installare un server PostgreSQL sul tuo computer.
-  - **macOS**: La via più semplice è Postgres.app.
-  - **Windows**: Scarica l'installer ufficiale da EDB. Durante l'installazione, ti chiederà di impostare una password per l'utente `postgres`. **Memorizzala!**
+### Prerequisiti
+- **Python 3.14+** — [Scarica qui](https://www.python.org/downloads/)
+- **Telegram**Che ha raccolto account (per ottenere token)
 
-### 2. Crea il Database
-Dopo aver installato PostgreSQL, apri un terminale e crea il database per il bot:
+### Setup locale (3 minuti)
+
 ```bash
-# Se il comando 'createdb' non funziona, apri la console SQL di Postgres ed esegui:
-# CREATE DATABASE burraco_bot_db;
-```
+# 1. Clona il repo
+git clone https://github.com/yourusername/burraco_bot.git
+cd burraco_bot
 
-### 3. Configura il Bot
-1. **Crea il bot su Telegram**:
-   - Apri Telegram e cerca **@BotFather**.
-   - Scrivi `/newbot` e segui le istruzioni.
-   - Copia il **token** che ti viene dato (es. `123456:ABC-DEF...`).
+# 2. Copia il template di configurazione
+cp .env.example .env
 
-2. **Prepara il progetto**:
-   ```bash
-   # Clona il repo o copia i file in una cartella
-   cd burraco-bot
+# 3. Installa dipendenze
+pip install -r requirements.txt
 
-   # Crea e attiva un ambiente virtuale
-   python -m venv .venv
-   source .venv/bin/activate   # Su Windows: .venv\Scripts\activate
+# 4. Configura credenziali (vedi sotto)
+# Edita .env con il tuo TELEGRAM_TOKEN e SUPABASE_KEY
 
-   # Installa le dipendenze
-   pip install -r requirements.txt
-   ```
-
-3. **Configura le variabili d'ambiente**:
-   - Crea un file chiamato `.env` nella cartella del progetto (puoi copiare da `.env.example` se esiste).
-   - Aggiungi le seguenti righe, sostituendo i valori:
-     ```
-     TELEGRAM_TOKEN="<il tuo token da BotFather>"
-     DATABASE_URL="postgresql://postgres:TUA_PASSWORD_POSTGRES@localhost:5432/burraco_bot_db"
-     TARGET_SCORE="2000"
-     ```
-     > **Nota**: Sostituisci `TUA_PASSWORD_POSTGRES` con la password che hai scelto durante l'installazione di PostgreSQL.
-
-### 4. Avvia il Bot
-Una volta configurato tutto, avvia il bot dal tuo terminale:
-```bash
+# 5. Avvia il bot
 python bot.py
 ```
-Al primo avvio, il bot creerà automaticamente le tabelle nel tuo database locale `burraco_bot_db`. Il bot rimarrà in esecuzione finché non chiuderai il terminale.
 
 ---
 
-## 🎮 Come si usa nel gruppo
+## 🔐 Configurazione Credenziali
+
+### Ottenere TELEGRAM_TOKEN
+1. Apri Telegram e cerca **@BotFather**
+2. Scrivi `/newbot` e segui le istruzioni
+3. Copia il token fornito
+
+### Ottenere SUPABASE_KEY (Database Cloud)
+1. Vai su [supabase.com](https://supabase.com) e crea un progetto gratis
+2. Vai a **Settings → API**
+3. Copia l'**URL** e la **Service Role Key** (KEY, non ANON)
+4. Esegui il `schema.sql` nell'editor SQL di Supabase
+
+### Configurare il file `.env`
+```env
+# .env (não comitir este arquivo!)
+TELEGRAM_TOKEN=123456:ABC-DEF...
+SUPABASE_URL=https://xxxxx.supabase.co
+SUPABASE_KEY=sb_secret_xxxxx
+TARGET_SCORE=2000  # Punteggio default 
+```
+
+---
+
+## 🐳 Deployment con Docker
+
+### Opzione 1: Docker Compose (Local Testing)
+```bash
+# Build e avvia il container
+make docker-run
+
+# Visualizza i logs
+make docker-logs
+
+# Ferma il container
+make docker-stop
+```
+
+### Opzione 2: Deploy su Cloud (Render, Railway, Heroku)
+
+#### 🎁 Su **Render** (Gratuito):
+1. Push il codice a GitHub (con credenziali nel `.env` locale, `.env` ignorato in git)
+2. Vai a [render.com](https://render.com)
+3. Crea un nuovo **Web Service**:
+   - **Repository**: Collega il tuo GitHub
+   - **Build command**: `pip install -r requirements.txt`
+   - **Start command**: `python bot.py`
+   - **Environment variables**: Carica `TELEGRAM_TOKEN`, `SUPABASE_URL`, `SUPABASE_KEY` dal Render dashboard
+4. Deploy — il bot verrà eseguito sempre
+
+---
+
+## 🛠️ Development
+
+### Installa dipendenze di dev
+```bash
+make install-dev
+```
+
+### Esegui i test
+```bash
+make test
+```
+
+### Lint/Format
+```bash
+make lint
+make format
+```
+
+### Comandi disponibili
+```bash
+make help  # Mostra tutti i comandi
+```
+
+---
+
+## 🎮 Comandi del Bot
 
 | Comando | Chi può usarlo | Descrizione |
 |---|---|---|
 | `/start` | Tutti | Registrazione e lista comandi |
-| `/nuovapartita` | Tutti | Crea una nuova partita |
+| `/nuovapartita [punti]` | Tutti | Crea una partita (default 2000 pt) |
 | `/unisciti` | Tutti | Entra nella partita in attesa |
-| `/inizia` | Chi ha creato la partita | Avvia la partita |
+| `/inizia` | Creatore | Avvia la partita (min 2 giocatori) |
 | `/mano` | Tutti | Registra i punteggi di una mano |
 | `/punteggi` | Tutti | Mostra il tabellone attuale |
-| `/classifica` | Tutti | Classifica globale (tutte le partite) |
-| `/finegioco` | Chi ha creato la partita | Termina la partita |
-| `/annulla` | Tutti | Annulla l'inserimento di una mano |
+| `/storico` | Tutti | Ultime 20 mani giocate |
+| `/annullamano` | Tutti | Annulla l'ultima mano registrata |
+| `/pausa` | Creatore | Metti la partita in pausa |
+| `/riprendi` | Creatore | Riprendi una partita in pausa |
+| `/classifica` | Tutti | Classifica globale 🏆 |
+| `/finegioco` | Creatore | Termina partita, incorona vincitore |
+
+---
+
+## 🔧 Troubleshooting
+
+### "Variabili d'ambiente mancanti"
+```bash
+# Verifica che .env esista e contenga:
+cat .env
+# Dovrebbe avere: TELEGRAM_TOKEN, SUPABASE_URL, SUPABASE_KEY
+
+# Se no:
+cp .env.example .env
+# Edita .env con i valori reali
+```
+
+### "Errore di connessione a Supabase"
+- Verifica l'URL e la KEY in `.env`
+- Controlla che il progetto Supabase sia attivo
+- Esegui `schema.sql` nella dashboard di Supabase (Settings → SQL Editor)
+
+### "Bot non risponde a /start"
+- Verifica che il TELEGRAM_TOKEN sia corretto
+- Il bot deve essere in modo "Private" (non "Inline" o "Group")
+- Riavvia il bot: `make run`
+
+###"Permission denied" su Render
+- Assicurati che il file `.env` sia in `.gitignore` (no credenziali in git!)
+- Leggi le Environment Variables nel Render dashboard, non dal repo
+
+---
+
+## 📋 Struttura del Progetto
+
+```
+burraco_bot/
+├── bot.py                  # Handler Telegram principali
+├── database.py             # Client Supabase async
+├── schema.sql              # Schema database (run su Supabase)
+├── Dockerfile              # Container per cloud deployment
+├── requirements.txt        # Dipendenze produzione
+├── requirements-dev.txt    # Dipendenze dev/test
+├── Makefile                # Comandi automatizzati
+├── .env.example            # Template configurazione
+├── .gitignore              # Esclude .env, cache, etc
+├── README.md               # Questo file
+└── tests/                  # Unit tests
+    ├── test_database.py
+    └── test_game_logic.py
+```
+
+---
+
+## 🚀 Roadmap (Post-Launch)
+
+- [ ] Multi-language support (en, es, fr, ...)
+- [ ] Admin dashboard (web UI per stats)
+- [ ] Caching Redis (classifica live)
+- [ ] Sentry monitoring (error tracking)
+- [ ] API GraphQL (integrazioni terze)
+- [ ] Mobile-friendly web interface
+
+---
+
+## 📝 Licenza
+
+MIT License — Usa liberamente nel tuo progetto!
+
+---
+
+## 👥 Contributi
+
+Segnalazioni di bug e feature requests? Apri una [issue su GitHub](https://github.com/yourusername/burraco_bot/issues)!
 
 ---
 
 ## 🃏 Come funziona il comando /mano
 
-Al termine di ogni mano, usa `/mano`. Il bot chiederà a turno il punteggio finale per ogni giocatore (un numero intero, può essere negativo). Il totale viene aggiornato subito.
+Al termine di ogni mano, usa `/mano`. Il bot chiederà a turno il punteggio finale di ogni giocatore (un numero intero, può essere negativo).
+Il totale viene aggiornato subito automaticamente.
 
 Esempio:
 ```

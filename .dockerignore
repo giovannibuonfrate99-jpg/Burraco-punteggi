@@ -1,0 +1,41 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.env
+
+# IDE & OS
+.vscode/
+.vscode-insiders/
+.idea/
+.DS_Store
+*.sw*
+*.swo
+*~
+Thumbs.db
+
+# Project specific
+burraco_bot_data.pkl
+*.sql.bak
+logs/
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+azure-pipelines.yml
+
+# Documentation
+docs/
+README.md

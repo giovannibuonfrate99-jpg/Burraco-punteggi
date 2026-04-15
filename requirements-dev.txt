@@ -1,0 +1,19 @@
+# Development & Testing Dependencies
+
+# Include all production requirements
+-r requirements.txt
+
+# Testing
+pytest==7.4.4
+pytest-asyncio==0.24.0
+pytest-mock==3.14.0
+
+# Code quality & linting
+pylint==3.0.3
+black==24.3.0
+flake8==7.0.0
+mypy==1.11.1
+
+# Debugging
+ipython==8.23.0
+ipdb==0.13.13

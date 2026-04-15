@@ -1,5 +1,6 @@
 import os
 import logging
+import sys
 from datetime import datetime, timezone
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -20,8 +21,83 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ENVIRONMENT VALIDATION
+# ══════════════════════════════════════════════════════════════════════════════
+def _validate_environment():
+    """Valida che tutte le variabili d'ambiente critiche siano presenti."""
+    required_vars = ["TELEGRAM_TOKEN", "SUPABASE_URL", "SUPABASE_KEY"]
+    missing = [var for var in required_vars if not os.getenv(var)]
+    
+    if missing:
+        logger.error(
+            f"❌ Variabili d'ambiente mancanti: {', '.join(missing)}\n"
+            f"   Copia .env.example in .env e riempi i valori:\n"
+            f"   cp .env.example .env"
+        )
+        sys.exit(1)
+    
+    logger.info("✅ Configurazione d'ambiente validata")
+
+_validate_environment()
+
 db = Database()
 TARGET_SCORE = int(os.getenv("TARGET_SCORE", 2000))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RATE LIMITING (anti-spam)
+# ══════════════════════════════════════════════════════════════════════════════
+# Format: {(chat_id, user_id): timestamp_last_mano_command}
+_rate_limits = {}
+RATE_LIMIT_SECONDS = 5  # Max 1 /mano ogni 5 secondi per utente
+
+def _check_rate_limit(chat_id: int, user_id: int) -> tuple[bool, str]:
+    """
+    Verifica se l'utente ha superato il rate limit su /mano.
+    
+    Returns:
+        (is_allowed: bool, message: str)
+        is_allowed=True se l'utente può procedere
+        message=msg di errore se rate-limited
+    """
+    key = (chat_id, user_id)
+    now = datetime.now(timezone.utc).timestamp()
+    last_call = _rate_limits.get(key, 0)
+    
+    if now - last_call < RATE_LIMIT_SECONDS:
+        remaining = int(RATE_LIMIT_SECONDS - (now - last_call)) + 1
+        return False, f"⏳ Aspetta ancora {remaining}s prima del prossimo /mano"
+    
+    _rate_limits[key] = now
+    return True, ""
+
+def _check_session_timeout(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
+    """
+    Verifica se una sessione di input è scaduta (>30 minuti).
+    Se sì, la cancella.
+    
+    Returns:
+        True se la sessione è valida, False se è scaduta
+    """
+    session = _get_session(context, chat_id)
+    if not session:
+        return True  # Nessuna sessione, non scaduta
+    
+    # Verifica se la sessione ha un timestamp
+    if "created_at" not in session:
+        session["created_at"] = datetime.now(timezone.utc).timestamp()
+        _set_session(context, chat_id, session)
+        return True
+    
+    now = datetime.now(timezone.utc).timestamp()
+    age = now - session["created_at"]
+    
+    if age > 30 * 60:  # 30 minuti
+        _clear_session(context, chat_id)
+        return False
+    
+    return True
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -52,6 +128,68 @@ def scoreboard_text(game_players: list, game: dict, title: str | None = None) ->
     if game.get("status") == "paused":
         lines.append("⏸ _Partita in pausa_")
     return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# VALIDAZIONE DATI
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def _validate_player_in_game(chat_id: int, player_id: int, game_id: int) -> bool:
+    """Verifica che un giocatore sia effettivamente in una partita."""
+    is_in = await db.is_in_game(game_id, player_id)
+    if not is_in:
+        logger.warning(f"Tentativo di accesso non autorizzato: player {player_id} non in game {game_id}")
+        return False
+    return True
+
+def _validate_score_input(raw_input: str) -> tuple[bool, int | None, str]:
+    """
+    Valida l'input del punteggio.
+    
+    Returns:
+        (is_valid: bool, score: int | None, error_message: str)
+    """
+    raw_input = raw_input.strip()
+    
+    # Regex: numeri, opzionalmente preceduti da segno + o -
+    if not re.fullmatch(r"^[+-]?\d{1,6}$", raw_input):
+        return False, None, "⚠️ Inserisci un numero intero (es. 150, -50)"
+    
+    try:
+        score = int(raw_input)
+        
+        # Validazione limiti ragionevoli
+        if abs(score) > 500000:
+            return False, None, "⚠️ Punteggio troppo alto! Max ±500.000"
+        
+        return True, score, ""
+        
+    except ValueError:
+        return False, None, "❌ Errore nel parsing del numero. Riprova."
+
+def _parse_callback_safe(callback_data: str, prefix: str) -> tuple[bool, str]:
+    """
+    Parse safe di callback_data, con protezione da IndexError.
+    
+    Args:
+        callback_data: es. "mp:score_123"
+        prefix: es. "mp:"
+    
+    Returns:
+        (success: bool, action: str)
+    """
+    try:
+        if not callback_data.startswith(prefix):
+            return False, ""
+        
+        action = callback_data[len(prefix):]
+        if not action:
+            return False, ""
+        
+        return True, action
+    except (IndexError, AttributeError) as e:
+        logger.warning(f"Malformed callback data: {callback_data} — {e}")
+        return False, ""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -386,7 +524,22 @@ async def cmd_inizia(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def cmd_mano(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
     chat = update.effective_chat
+    
+    # ── Rate limiting: max 1 /mano ogni 5 secondi
+    allowed, error_msg = _check_rate_limit(chat.id, user.id)
+    if not allowed:
+        await update.message.reply_text(f"⏳ {error_msg}")
+        return
+    
+    # ── Session timeout: cancella sessioni vecchie (>30 min)
+    if not _check_session_timeout(context, chat.id):
+        await update.message.reply_text(
+            "⏰ La sessione di input è scaduta dopo 30 minuti.\n"
+            "Usa nuovamente /mano per ricominciare."
+        )
+        return
 
     if _get_session(context, chat.id):
         await update.message.reply_text(
@@ -420,6 +573,7 @@ async def cmd_mano(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "editing_pid":  None,
         "input":        "",
         "msg_id":       None,
+        "created_at":   datetime.now(timezone.utc).timestamp(),  # Per timeout tracking
     }
     _set_session(context, chat.id, session)
 
@@ -494,9 +648,17 @@ async def numpad_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not all(v is not None for v in session["scored"].values()):
                 await query.answer("Non tutti i punteggi sono stati inseriti!", show_alert=True)
                 return
-            recap = await _commit_hand_and_recap(session, session["game"])
+            
+            recap, success = await _commit_hand_and_recap(session, session["game"])
             _clear_session(context, chat_id)
-            await query.edit_message_text(recap, parse_mode="Markdown")
+            
+            if not success:
+                # Errore nel salvataggio — notifica l'utente chiaramente
+                await query.edit_message_text(recap, parse_mode="Markdown")
+                logger.error(f"Salvataggio della mano fallito nel gruppo {chat_id}")
+            else:
+                # Successo — mostra il riepilogo
+                await query.edit_message_text(recap, parse_mode="Markdown")
             return
 
         if action == "history":
@@ -540,12 +702,14 @@ async def text_score_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception:
         pass
 
-    # Validazione: numero intero opzionalmente preceduto da -
-    if not re.fullmatch(r"-?\d{1,6}", raw):
+    # Validazione usando la nuova funzione safe
+    is_valid, score, error_msg = _validate_score_input(raw)
+    
+    if not is_valid:
         # Manda un alert temporaneo rispondendo e poi eliminando subito
         err = await context.bot.send_message(
             chat_id=chat_id,
-            text="⚠️ Inserisci solo un numero intero (es. `300` o `-150`).",
+            text=error_msg,
             parse_mode="Markdown",
         )
         context.job_queue.run_once(
@@ -554,9 +718,8 @@ async def text_score_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
-    value = int(raw)
     pid   = session["editing_pid"]
-    session["scored"][pid] = value
+    session["scored"][pid] = score
     session["state"]       = "panel"
     session["editing_pid"] = None
     session["input"]       = ""
@@ -579,45 +742,76 @@ async def text_score_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # COMMIT MANO + RIEPILOGO
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def _commit_hand_and_recap(session: dict, game: dict) -> str:
+async def _commit_hand_and_recap(session: dict, game: dict) -> tuple[str, bool]:
+    """
+    Salva la mano nel database e genera il riepilogo.
+    
+    Returns:
+        (recap_text: str, success: bool)
+        success=True se tutto è andato bene
+        success=False + errore in recap_text se qualcosa è fallito
+    """
     scored       = session["scored"]
     players_info = session["players_info"]
 
-    hand    = await db.save_full_hand(game["id"], scored)
-    for pid, punteggio in scored.items():
-        await db.update_player_score(game["id"], pid, punteggio)
+    try:
+        # Salva la mano (RPC atomico garantisce consistency)
+        hand    = await db.save_full_hand(game["id"], scored)
+        
+        # Aggiorna i punteggi (usando RPC atomico in update_player_score)
+        for pid, punteggio in scored.items():
+            await db.update_player_score(game["id"], pid, punteggio)
 
-    players = await db.get_game_players(game["id"])
-    target  = game["target_score"]
-    lines   = [f"🏁 *Riepilogo Mano #{hand['hand_number']}*\n"]
+        players = await db.get_game_players(game["id"])
+        target  = game["target_score"]
+        lines   = [f"🏁 *Riepilogo Mano #{hand['hand_number']}*\n"]
 
-    for p in players:
-        pid   = p["player_id"]
-        name  = players_info.get(pid, "?")
-        delta = scored.get(pid, 0)
-        total = p["total_score"]
-        sign  = "+" if delta >= 0 else ""
-        bar   = _progress_bar(total, target)
-        pct   = max(0, min(100, round(total / target * 100))) if target > 0 else 0
-        lines.append(f"• {name}: {sign}{delta} pt → *{total}* pt\n  `{bar}` {pct}%")
+        for p in players:
+            pid   = p["player_id"]
+            name  = players_info.get(pid, "?")
+            delta = scored.get(pid, 0)
+            total = p["total_score"]
+            sign  = "+" if delta >= 0 else ""
+            bar   = _progress_bar(total, target)
+            pct   = max(0, min(100, round(total / target * 100))) if target > 0 else 0
+            lines.append(f"• {name}: {sign}{delta} pt → *{total}* pt\n  `{bar}` {pct}%")
 
-    winner = next((p for p in players if p["total_score"] >= target), None)
-    text   = "\n".join(lines)
+        winner = next((p for p in players if p["total_score"] >= target), None)
+        text   = "\n".join(lines)
 
-    if winner:
-        wname        = winner["players"]["display_name"]
-        winfo        = {p["player_id"]: p["players"]["display_name"] for p in players}
-        final_stats  = await _build_final_stats(game, winfo)
-        text += (
-            f"\n\n🏆 *{wname} ha raggiunto {target} punti e vince la partita!*"
-            f"{final_stats}"
-            f"\n\nUsa /nuovapartita per una nuova sfida!"
+        if winner:
+            wname        = winner["players"]["display_name"]
+            winfo        = {p["player_id"]: p["players"]["display_name"] for p in players}
+            final_stats  = await _build_final_stats(game, winfo)
+            text += (
+                f"\n\n🏆 *{wname} ha raggiunto {target} punti e vince la partita!*"
+                f"{final_stats}"
+                f"\n\nUsa /nuovapartita per una nuova sfida!"
+            )
+            await db.finish_game(game["id"], winner["player_id"])
+        else:
+            text += "\n\nUsa /mano per la prossima mano."
+
+        return text, True
+        
+    except RuntimeError as e:
+        error_text = (
+            f"❌ *Errore: non è stato possibile salvare la mano.*\n\n"
+            f"Dettagli: {str(e)}\n\n"
+            f"I dati potrebbero essere incompleti. "
+            f"Chiedi a un amministratore di controllare l'ultima mano."
         )
-        await db.finish_game(game["id"], winner["player_id"])
-    else:
-        text += "\n\nUsa /mano per la prossima mano."
-
-    return text
+        logger.error(f"Errore critico nel salvataggio della mano: {e}", exc_info=True)
+        return error_text, False
+        
+    except Exception as e:
+        error_text = (
+            f"❌ *Errore imprevisto durante il salvataggio.*\n\n"
+            f"Riprova con /mano.\n"
+            f"Se il problema persiste, avvicinati a un amministratore."
+        )
+        logger.error(f"Errore non gestito nel commit della mano: {e}", exc_info=True)
+        return error_text, False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
