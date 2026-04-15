@@ -46,18 +46,26 @@ ls -la Dockerfile requirements.txt .env.example
 ### Passo 3: Crea un Nuovo Web Service
 
 1. **Dashboard Render** → Click **"+ New"** (top-right)
-2. Seleziona **"Web Service"**
+2. Seleziona **"Web Service"** (rimane GRATIS!)
 
 ```
 ┌────────────────────────────────────┐
 │ New +                              │
 ├────────────────────────────────────┤
-│ Web Service                        │
+│ Web Service              ← SELEZIONA QUESTO │
 │ Static Site                        │
-│ Background Worker                 │
+│ Background Worker                  │
 │ Cron Job                           │
 └────────────────────────────────────┘
 ```
+
+**Perché Web Service?**
+- ✅ Rimane completamente GRATIS (niente costi nascosti)
+- ✅ Il bot ora usa **webhook mode** (espone una porta HTTP su 8000)
+- ✅ Render può fare health check sulla porta
+- ✅ Telegram invia i messaggi al webhook URL del tuo servizio
+
+**Nota tecnica**: Il bot precedentemente usava polling, adesso usa webhook per essere compatible con Render free tier.
 
 3. Click **"Web Service"**
 
@@ -151,19 +159,25 @@ Environment Variables
 ```
 Building Docker image...
 Provisioning container...
-Running: python bot.py
-✅ Service available at: https://burraco-bot.onrender.com
+Running: uvicorn bot:web_app --host 0.0.0.0 --port 8000
+✅ Web Service disponibile
+🌐 L'app è online su https://burraco-bot.onrender.com
 ```
 
 **⏳ Tempo atteso**: 2-5 minuti per il primo deploy
 
-**Output atteso nel log:**
+**Output atteso nel log** (vedi da Render Dashboard → Logs):
 ```
-> python bot.py
+> uvicorn bot:web_app ...
 ✅ Configurazione d'ambiente validata
-✅ Connesso a Supabase ✅
-🃏 Bot Burraco avviato!
+✅ Connesso a Supabase
+🃏 Bot Burraco avviato in webhook mode
+   Porta: 8000
+   Webhook URL: https://burraco-bot.onrender.com/webhook
+Uvicorn running on http://0.0.0.0:8000
 ```
+
+Il webhook viene configurato automaticamente dal bot all'avvio!
 
 ---
 
@@ -254,6 +268,39 @@ git push origin main
 # Nel file render.yaml (vedi sotto) aumenta memory
 # O controlla logs per leak/crash
 ```
+
+### ⚠️ "Webhook not working / Invalid token"
+
+**Cosa significa:**
+Il webhook di Telegram non riesce a contattare il tuo servizio, di solito causa token errato o URL non raggiungibile.
+
+**Soluzione step-by-step:**
+
+1. **Controlla i logs Render**:
+   ```
+   Dashboard → burraco-bot → Logs
+   ```
+   Ricerca (`Cmd+F`) per:
+   - ❌ "Invalid token" → TELEGRAM_TOKEN non corretto
+   - ❌ "HTTP 401" → credenziali errate
+   - ✅ "Webhook URL: https://burraco-bot.onrender.com/webhook" → OK
+
+2. **Verifica il TELEGRAM_TOKEN**:
+   - Vai su @BotFather su Telegram
+   - `/mybots` → seleziona il tuo bot
+   - Copia il token
+   - Compara con quello in Render dashboard → Settings → Environment
+
+3. **Se il token è corretto** ma ancora non funziona:
+   - Attendi 1-2 minuti dopo il deploy (il webhook ha un delay)
+   - Riavvia il servizio: Dashboard → burraco-bot → Settings → "Restart" button
+   - Invia di nuovo `/start` al bot su Telegram
+
+4. **Ultimo resort: Rigenera il token**:
+   - @BotFather → `/mybots` → tuo bot → `/revoke`
+   - `/newtoken` per generare uno nuovo
+   - Aggiorna Render env var
+   - Redeploy (push qualcosa a GitHub o manuale restart)
 
 ---
 
