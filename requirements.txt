@@ -3,7 +3,7 @@
 # Last updated: 2026-04-15
 
 # Core messaging & async
-python-telegram-bot==22.6
+python-telegram-bot[webhooks]==22.6
 python-dotenv==1.2.2
 
 # Database & async HTTP
