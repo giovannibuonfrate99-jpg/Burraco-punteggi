@@ -70,18 +70,7 @@ class Database:
             })
             .execute()
         )
-        if not res.data:
-            return None
-        
-        game = res.data[0]
-        # Calcoliamo quante partite sono state create prima (o insieme) a questa nello stesso gruppo
-        count_res = await self.client.table("games") \
-            .select("id", count="exact") \
-            .eq("chat_id", chat_id) \
-            .lte("id", game["id"]) \
-            .execute()
-        game["ordinal"] = count_res.count if count_res.count is not None else 1
-        return game
+        return res.data[0] if res.data else None
 
     async def get_active_game(self, chat_id: int):
         """
@@ -98,17 +87,7 @@ class Database:
             .limit(1)
             .execute()
         )
-        if not res.data:
-            return None
-        
-        game = res.data[0]
-        count_res = await self.client.table("games") \
-            .select("id", count="exact") \
-            .eq("chat_id", chat_id) \
-            .lte("id", game["id"]) \
-            .execute()
-        game["ordinal"] = count_res.count if count_res.count is not None else 1
-        return game
+        return res.data[0] if res.data else None
 
     async def start_game(self, game_id: int):
         await (

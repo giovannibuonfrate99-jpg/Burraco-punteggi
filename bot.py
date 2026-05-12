@@ -114,7 +114,7 @@ def _progress_bar(score: int, target: int, width: int = 10) -> str:
     return "█" * filled + "░" * (width - filled)
 
 def scoreboard_text(game_players: list, game: dict, title: str | None = None) -> str:
-    game_num = game.get("ordinal", game["id"])
+    game_num = game["id"]
     header = title or f"📊 *Punteggi — partita #{game_num}*"
     lines  = [header + "\n"]
     target = game["target_score"]
@@ -1106,7 +1106,7 @@ async def cmd_finegioco(update: Update, context: ContextTypes.DEFAULT_TYPE):
     players_info = {p["player_id"]: p["players"]["display_name"] for p in players}
     await db.finish_game(game["id"], winner["player_id"])
 
-    game_num = game.get("ordinal", game["id"])
+    game_num = game["id"]
     lines = [f"🏁 *Partita #{game_num} terminata!*\n"]
     for i, p in enumerate(players, 1):
         name  = p["players"]["display_name"]
