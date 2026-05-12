@@ -26,7 +26,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY bot.py database.py schema.sql .env.example ./
+COPY bot.py database.py messages.py schema.sql .env.example ./
 
 # Health check (optional, for orchestration)
 HEALTHCHECK --interval=60s --timeout=10s --start-period=5s --retries=3 \
