@@ -76,7 +76,7 @@ class Database:
         game = res.data[0]
         # Calcoliamo quante partite sono state create prima (o insieme) a questa nello stesso gruppo
         count_res = await (
-            self.client.table("games").select("id", count="exact").eq("chat_id", chat_id).lte("created_at", game["created_at"]).execute()
+            self.client.table("games").select("id", count="exact").eq("chat_id", chat_id).lte("id", game["id"]).execute()
         )
         game["ordinal"] = count_res.count if count_res.count else 1
         return game
@@ -101,7 +101,7 @@ class Database:
         
         game = res.data[0]
         count_res = await (
-            self.client.table("games").select("id", count="exact").eq("chat_id", chat_id).lte("created_at", game["created_at"]).execute()
+            self.client.table("games").select("id", count="exact").eq("chat_id", chat_id).lte("id", game["id"]).execute()
         )
         game["ordinal"] = count_res.count if count_res.count else 1
         return game
