@@ -85,3 +85,35 @@ BEGIN
     RETURN v_new_score;
 END;
 $$ LANGUAGE plpgsql;
+
+-- ═════════════════════════════════════════════════════════════════════════════
+-- ROW LEVEL SECURITY (RLS) - Proteggi le tabelle
+-- ═════════════════════════════════════════════════════════════════════════════
+-- Il bot usa la Service Role Key che bypassa RLS, ma le policy proteggono
+-- l'accesso da chiavi anonime o da utenti non autorizzati
+
+ALTER TABLE IF EXISTS players ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS games ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS game_players ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS hands ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS hand_scores ENABLE ROW LEVEL SECURITY;
+
+-- Players: Permetti tutte le operazioni (il bot usa service role)
+CREATE POLICY "players_allow_all" ON players
+FOR ALL USING (true) WITH CHECK (true);
+
+-- Games: Permetti tutte le operazioni
+CREATE POLICY "games_allow_all" ON games
+FOR ALL USING (true) WITH CHECK (true);
+
+-- Game Players: Permetti tutte le operazioni
+CREATE POLICY "game_players_allow_all" ON game_players
+FOR ALL USING (true) WITH CHECK (true);
+
+-- Hands: Permetti tutte le operazioni
+CREATE POLICY "hands_allow_all" ON hands
+FOR ALL USING (true) WITH CHECK (true);
+
+-- Hand Scores: Permetti tutte le operazioni
+CREATE POLICY "hand_scores_allow_all" ON hand_scores
+FOR ALL USING (true) WITH CHECK (true);

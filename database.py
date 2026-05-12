@@ -8,6 +8,18 @@ load_dotenv()
 
 
 class Database:
+
+    async def get_player_by_username_or_name(self, username_or_name: str):
+        # Cerca prima per username, poi per display_name
+        res = await (
+            self.client.table("players")
+            .select("*")
+            .or_(f"username.eq.{username_or_name},display_name.eq.{username_or_name}")
+            .limit(1)
+            .execute()
+        )
+        return res.data[0] if res.data else None
+    
     def __init__(self):
         self.url: str = os.environ.get("SUPABASE_URL", "")
         self.key: str = os.environ.get("SUPABASE_KEY", "")

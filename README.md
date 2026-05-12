@@ -118,7 +118,7 @@ make help  # Mostra tutti i comandi
 |---|---|---|
 | `/start` | Tutti | Registrazione e lista comandi |
 | `/nuovapartita [punti]` | Tutti | Crea una partita (default 2000 pt) |
-| `/unisciti` | Tutti | Entra nella partita in attesa |
+| `/unisciti [@username|nome]` | Tutti | Entra nella partita in attesa o aggiungi un altro utente (es: /unisciti @giovanni o /unisciti Giovanni Rossi). Puoi usare sia il tag @username sia il nome visualizzato. |
 | `/inizia` | Creatore | Avvia la partita (min 2 giocatori) |
 | `/mano` | Tutti | Registra i punteggi di una mano |
 | `/punteggi` | Tutti | Mostra il tabellone attuale |

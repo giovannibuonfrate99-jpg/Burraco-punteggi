@@ -54,7 +54,7 @@ START_WELCOME = """🃏 *Bot Burraco* — Benvenuto, {user}!
 
 Comandi principali:
 • /nuovapartita [punti] — crea una partita (es. /nuovapartita 3000)
-• /unisciti — entra nella partita in corso
+• /unisciti [@username|nome] — entra nella partita in corso o aggiungi un altro utente (puoi usare sia il tag @username sia il nome visualizzato)
 • /inizia — avvia la partita (almeno 2 giocatori)
 • /mano — registra i punteggi di una mano
 • /punteggi — mostra il tabellone

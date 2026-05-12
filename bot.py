@@ -378,9 +378,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await db.register_player(user.id, user.username, user.first_name)
     await update.message.reply_text(
         f"🃏 *Bot Burraco* — Benvenuto, {user.first_name}!\n\n"
-        "Comandi:\n"
+        "Comandi principali:\n"
         "• /nuovapartita [punti] — crea una partita (es. /nuovapartita 3000)\n"
-        "• /unisciti — entra nella partita in corso\n"
+        "• /unisciti [@username|nome] — entra nella partita in corso o aggiungi un altro utente (es. /unisciti @giovanni o /unisciti Giovanni Rossi)\n"
+        "     Puoi usare sia il tag @username sia il nome visualizzato.\n"
         "• /inizia — avvia la partita (almeno 2 giocatori)\n"
         "• /mano — registra i punteggi di una mano\n"
         "• /punteggi — mostra il tabellone\n"
@@ -389,7 +390,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /pausa — metti la partita in pausa\n"
         "• /riprendi — riprendi una partita in pausa\n"
         "• /classifica — classifica globale 🏆\n"
-        "• /finegioco — termina e incorona il vincitore\n",
+        "• /finegioco — termina e incorona il vincitore\n\n"
+        "Per aggiungere un amico che non ha il telefono, usa il suo @username o il nome visualizzato!",
         parse_mode="Markdown",
     )
 
@@ -451,7 +453,24 @@ async def cmd_nuova_partita(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_unisciti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
-    await db.register_player(user.id, user.username, user.first_name)
+    args = context.args if hasattr(context, 'args') else []
+
+    # Se viene passato un parametro, si cerca di aggiungere quell'utente
+    if args:
+        # Parametro: username o nome
+        target_name = args[0].lstrip("@")
+        # Cerca utente per username o display_name
+        target_player = await db.get_player_by_username_or_name(target_name)
+        if not target_player:
+            await update.message.reply_text(f"❌ Nessun utente trovato con nome o username '{target_name}'.")
+            return
+        target_id = target_player["telegram_id"]
+        target_display = target_player["display_name"]
+    else:
+        # Comportamento classico: aggiungi chi invia il comando
+        await db.register_player(user.id, user.username, user.first_name)
+        target_id = user.id
+        target_display = user.first_name
 
     game = await db.get_active_game(chat.id)
     if not game:
@@ -464,19 +483,30 @@ async def cmd_unisciti(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ La partita è in pausa e già iniziata, non puoi unirti.")
         return
 
-    added = await db.add_player_to_game(game["id"], user.id)
+    added = await db.add_player_to_game(game["id"], target_id)
     if not added:
-        await update.message.reply_text(f"ℹ️ Sei già iscritto alla partita, {user.first_name}!")
+        if args:
+            await update.message.reply_text(f"ℹ️ {target_display} è già iscritto/a alla partita!")
+        else:
+            await update.message.reply_text(f"ℹ️ Sei già iscritto alla partita, {target_display}!")
         return
 
     players = await db.get_game_players(game["id"])
     names   = [p["players"]["display_name"] for p in players]
-    await update.message.reply_text(
-        f"👋 *{user.first_name}* si è unito/a!\n\n"
-        f"Giocatori ({len(names)}): {', '.join(names)}\n"
-        f"Usa /inizia quando siete tutti pronti.",
-        parse_mode="Markdown",
-    )
+    if args:
+        await update.message.reply_text(
+            f"👋 *{target_display}* è stato aggiunto alla partita da {user.first_name}!\n\n"
+            f"Giocatori ({len(names)}): {', '.join(names)}\n"
+            f"Usa /inizia quando siete tutti pronti.",
+            parse_mode="Markdown",
+        )
+    else:
+        await update.message.reply_text(
+            f"👋 *{target_display}* si è unito/a!\n\n"
+            f"Giocatori ({len(names)}): {', '.join(names)}\n"
+            f"Usa /inizia quando siete tutti pronti.",
+            parse_mode="Markdown",
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1121,6 +1151,9 @@ def main():
         # Fallback se non in Render (local dev)
         base_url = f"http://localhost:{port}"
 
+    # Se l'URL non è HTTPS, usa polling invece del webhook
+    use_polling = base_url.startswith("http://localhost") or not base_url.startswith("https://")
+
     persistence = PicklePersistence(filepath="burraco_bot_data.pkl")
 
     app = (
@@ -1152,17 +1185,19 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_score_handler))
     app.add_error_handler(error_handler)
 
-    logger.info(f"🃏 Bot Burraco avviato in webhook mode")
-    logger.info(f"   Porta: {port}")
-    logger.info(f"   Webhook URL: {base_url}/webhook")
-    
-    # Avvia in webhook mode (Starlette server built-in)
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        url_path="/webhook",
-        webhook_url=f"{base_url}/webhook"
-    )
+    if use_polling:
+        logger.info("🃏 Bot Burraco avviato in polling mode (sviluppo locale)")
+        app.run_polling()
+    else:
+        logger.info(f"🃏 Bot Burraco avviato in webhook mode")
+        logger.info(f"   Porta: {port}")
+        logger.info(f"   Webhook URL: {base_url}/webhook")
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path="/webhook",
+            webhook_url=f"{base_url}/webhook"
+        )
 
 
 if __name__ == "__main__":
