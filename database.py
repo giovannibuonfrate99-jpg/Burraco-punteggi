@@ -97,6 +97,40 @@ class Database:
             .execute()
         )
 
+    async def cleanup_bad_games(self):
+        """
+        Identifica e cancella le partite 'finished' che non hanno alcuna mano registrata.
+        Queste sono solitamente partite chiuse per errore o prematuramente.
+        """
+        try:
+            # Recuperiamo gli ID di tutte le partite con stato 'finished'
+            res = await self.client.table("games").select("id").eq("status", "finished").execute()
+            if not res or not res.data:
+                return
+
+            game_ids = [g["id"] for g in res.data]
+            
+            # Troviamo quali di questi ID hanno almeno una mano registrata nella tabella hands
+            hands_res = await self.client.table("hands").select("game_id").in_("game_id", game_ids).execute()
+            games_with_hands = {h["game_id"] for h in hands_res.data} if (hands_res and hands_res.data) else set()
+            
+            # Gli ID che sono nello stato 'finished' ma non hanno mani sono "bad games"
+            bad_game_ids = [gid for gid in game_ids if gid not in games_with_hands]
+            
+            if bad_game_ids:
+                await self.client.table("games").delete().in_("id", bad_game_ids).execute()
+                self.logger.info(f"🧹 Pulizia automatica: rimosse {len(bad_game_ids)} partite 'bad' (senza mani).")
+        except Exception as e:
+            self.logger.error(f"Errore durante la pulizia dei bad games: {e}")
+
+    async def update_game_target_score(self, game_id: int, new_target: int):
+        await (
+            self.client.table("games")
+            .update({"target_score": new_target})
+            .eq("id", game_id)
+            .execute()
+        )
+
     async def pause_game(self, game_id: int):
         await (
             self.client.table("games")
@@ -124,6 +158,8 @@ class Database:
             .eq("id", game_id)
             .execute()
         )
+        # Esegue la pulizia ogni volta che una partita viene conclusa
+        await self.cleanup_bad_games()
 
     # ── Giocatori in partita ───────────────────────────────────────────────
 

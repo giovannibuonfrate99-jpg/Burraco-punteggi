@@ -13,6 +13,7 @@ from telegram.ext import (
 from telegram.error import NetworkError, TimedOut
 from dotenv import load_dotenv
 from database import Database
+from messages import INFO_THREE_PLAYER_RULE
 
 load_dotenv()
 logging.basicConfig(
@@ -807,7 +808,7 @@ async def _commit_hand_and_recap(session: dict, game: dict) -> tuple[str, bool]:
             lines.append(f"• {name}: {sign}{delta} pt → *{total}* pt\n  `{bar}` {pct}%")
 
         winner = next((p for p in players if p["total_score"] >= target), None)
-        text   = "\n".join(lines)
+        text   = "\n".join(lines) + INFO_THREE_PLAYER_RULE
 
         if winner:
             wname        = winner["players"]["display_name"]
