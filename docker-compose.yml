@@ -17,6 +17,7 @@ services:
     volumes:
       - ./bot.py:/app/bot.py
       - ./database.py:/app/database.py
+      - ./messages.py:/app/messages.py
     # Optional: expose logs
     logging:
       driver: "json-file"
