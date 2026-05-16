@@ -415,6 +415,10 @@ class Database:
         res = await self.client.table("classifica_globale").select("*").execute()
         return res.data or []
 
+    async def get_classifica_coppie(self):
+        res = await self.client.table("classifica_coppie").select("*").execute()
+        return res.data or []
+
     # ── Pulizia dati ──────────────────────────────────────────────────────
 
     async def delete_all_data_except_players(self):

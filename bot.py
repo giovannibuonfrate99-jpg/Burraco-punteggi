@@ -1076,20 +1076,40 @@ async def cmd_punteggi(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def cmd_classifica(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    rows = await db.get_classifica_globale()
-    if not rows:
+    individual = await db.get_classifica_globale()
+    coppie     = await db.get_classifica_coppie()
+    
+    if not individual:
         await update.message.reply_text("Nessuna partita conclusa ancora! 🃏")
         return
-    lines  = ["🏆 *Classifica Globale*\n"]
-    medals = ["🥇", "🥈", "🥉"]
-    for i, row in enumerate(rows):
-        medal = medals[i] if i < 3 else f"{i+1}."
-        lines.append(
-            f"{medal} *{row['display_name']}*  "
-            f"— {row['vittorie']}V / {row['partite_giocate']}P  "
-            f"(media {row['media_punti']} pt)"
-        )
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    text = "🏆 *RANKING BURRACO*\n\n"
+    
+    # --- Sezione Individuale ---
+    text += "👤 *Top Giocatori*\n"
+    text += "```\n"
+    text += f"{'Pos':<4}{'Nome':<20}{'P':<3}{'V':<3}{'WR':<5}\n"
+    text += "─" * 35 + "\n"
+    for i, row in enumerate(individual[:10]):
+        pos = f"{i+1}."
+        name = row['display_name'][:19]
+        text += f"{pos:<4}{name:<20}{row['partite_giocate']:<3}{row['vittorie']:<3}{row['win_rate']}% \n"
+    text += "```\n"
+
+    # --- Sezione Coppie ---
+    if coppie:
+        text += "🤝 *Top Coppie (2 vs 2)*\n"
+        text += "```\n"
+        text += f"{'Pos':<4}{'Coppia':<25}{'P':<3}{'V':<3}\n"
+        text += "─" * 35 + "\n"
+        for i, row in enumerate(coppie[:5]):
+            pos = f"{i+1}."
+            team_name = row['coppia'][:24]
+            text += f"{pos:<4}{team_name:<25}{row['giocate']:<3}{row['vittorie']:<3}\n"
+        text += "```\n"
+
+    text += "\n_P: Partite | V: Vittorie | WR: Win Rate %_"
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
