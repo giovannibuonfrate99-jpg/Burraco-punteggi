@@ -41,7 +41,7 @@ INFO_THREE_PLAYER_RULE = """⚠️ *Fase finale (1000 punti raggiunti!)* ⚠️
 Essendo in 3 giocatori, da questo momento:
 • Si gioca ognuno per sé (tutti contro tutti).
 • Devono essere preparati **3 pozzetti** individuali.
-• Il nuovo obiettivo per vincere è **1500 punti**."""
+• Il nuovo obiettivo per vincere è **1505 punti**."""
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MESSAGGI INFORMATIVI

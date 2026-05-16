@@ -459,8 +459,9 @@ async def cmd_unisciti(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Se viene passato un parametro, si cerca di aggiungere quell'utente
     if args:
-        # Parametro: username o nome
-        target_name = args[0].lstrip("@")
+        # Uniamo tutti gli argomenti per gestire nomi completi (es. "Mario Rossi")
+        target_input = " ".join(args)
+        target_name = target_input.lstrip("@")
         # Cerca utente per username o display_name
         target_player = await db.get_player_by_username_or_name(target_name)
         if not target_player:
@@ -539,6 +540,11 @@ async def cmd_inizia(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⚠️ Servono almeno *2 giocatori* per iniziare!", parse_mode="Markdown"
         )
         return
+
+    # Se sono in 3 e il punteggio è quello di default, imposta a 1505
+    if len(players) == 3 and game["target_score"] == TARGET_SCORE:
+        await db.update_game_target_score(game["id"], 1505)
+        game["target_score"] = 1505
 
     await db.start_game(game["id"])
     names = [p["players"]["display_name"] for p in players]
@@ -809,7 +815,11 @@ async def _commit_hand_and_recap(session: dict, game: dict) -> tuple[str, bool]:
             lines.append(f"• {name}: {sign}{delta} pt → *{total}* pt\n  `{bar}` {pct}%")
 
         winner = next((p for p in players if p["total_score"] >= target), None)
-        text   = "\n".join(lines) + INFO_THREE_PLAYER_RULE
+        text   = "\n".join(lines)
+
+        # Mostra la regola dei 3 giocatori solo se sono in 3 e almeno uno ha >= 1000 punti
+        if len(players) == 3 and any(p["total_score"] >= 1000 for p in players):
+            text += "\n" + INFO_THREE_PLAYER_RULE
 
         if winner:
             wname        = winner["players"]["display_name"]
