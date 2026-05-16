@@ -815,23 +815,27 @@ async def _commit_hand_and_recap(session: dict, game: dict) -> tuple[str, bool]:
             pct   = max(0, min(100, round(total / target * 100))) if target > 0 else 0
             lines.append(f"• {name}: {sign}{delta} pt → *{total}* pt\n  `{bar}` {pct}%")
 
-        winner = next((p for p in players if p["total_score"] >= target), None)
+        # Calcolo vincitori: chi ha il punteggio massimo tra quelli che hanno superato il target
+        max_score = max(p["total_score"] for p in players)
+        winners = [p for p in players if p["total_score"] == max_score and max_score >= target]
+        
         text   = "\n".join(lines)
 
         # Mostra la regola dei 3 giocatori solo se sono in 3 e almeno uno ha >= 1000 punti
         if len(players) == 3 and any(p["total_score"] >= 1000 for p in players):
             text += "\n" + INFO_THREE_PLAYER_RULE
 
-        if winner:
-            wname        = winner["players"]["display_name"]
+        if winners:
+            w_names      = ", ".join([w["players"]["display_name"] for w in winners])
             winfo        = {p["player_id"]: p["players"]["display_name"] for p in players}
             final_stats  = await _build_final_stats(game, winfo)
+            verb = "ha" if len(winners) == 1 else "hanno"
+            win_verb = "vince" if len(winners) == 1 else "vincono"
             text += (
-                f"\n\n🏆 *{wname} ha raggiunto {target} punti e vince la partita!*"
-                f"{final_stats}"
-                f"\n\nUsa /nuovapartita per una nuova sfida!"
+                f"\n\n🏆 *{w_names} {verb} raggiunto {max_score} punti e {win_verb} la partita!*"
+                f"{final_stats}\n\nUsa /nuovapartita per una nuova sfida!"
             )
-            await db.finish_game(game["id"], winner["player_id"])
+            await db.finish_game(game["id"], winners[0]["player_id"])
         else:
             text += "\n\nUsa /mano per la prossima mano."
 
@@ -1113,9 +1117,10 @@ async def cmd_finegioco(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Partita terminata.")
         return
 
-    winner       = max(players, key=lambda p: p["total_score"])
+    max_score    = max(p["total_score"] for p in players)
+    winners      = [p for p in players if p["total_score"] == max_score]
     players_info = {p["player_id"]: p["players"]["display_name"] for p in players}
-    await db.finish_game(game["id"], winner["player_id"])
+    await db.finish_game(game["id"], winners[0]["player_id"])
 
     game_num = game["id"]
     lines = [f"🏁 *Partita #{game_num} terminata!*\n"]
@@ -1124,7 +1129,9 @@ async def cmd_finegioco(update: Update, context: ContextTypes.DEFAULT_TYPE):
         score = p["total_score"]
         bar   = _progress_bar(score, game["target_score"])
         lines.append(f"{i}. {name}: *{score}* pt  `{bar}`")
-    lines.append(f"\n🏆 Vincitore: *{winner['players']['display_name']}*!")
+    
+    w_names = ", ".join([w["players"]["display_name"] for w in winners])
+    lines.append(f"\n🏆 {'Vincitore' if len(winners) == 1 else 'Vincitori'}: *{w_names}*!")
 
     final_stats = await _build_final_stats(game, players_info)
     text = "\n".join(lines) + final_stats + "\n\nUsa /nuovapartita per una nuova sfida!"

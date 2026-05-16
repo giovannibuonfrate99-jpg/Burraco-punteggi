@@ -52,7 +52,11 @@ SELECT
     p.display_name,
     p.telegram_id,
     COUNT(DISTINCT g.id) AS partite_giocate,
-    COUNT(DISTINCT g.id) FILTER (WHERE g.winner_id = p.telegram_id) AS vittorie,
+    COUNT(DISTINCT g.id) FILTER (
+        WHERE g.status = 'finished' AND gp.total_score = (
+            SELECT MAX(gp2.total_score) FROM game_players gp2 WHERE gp2.game_id = g.id
+        )
+    ) AS vittorie,
     COALESCE(AVG(gp.total_score), 0)::INTEGER AS media_punti
 FROM players p
 LEFT JOIN game_players gp ON gp.player_id = p.telegram_id
