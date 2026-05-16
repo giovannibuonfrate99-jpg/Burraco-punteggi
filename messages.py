@@ -35,6 +35,8 @@ SUCCESS_HAND_CANCELLED = "❌ Mano annullata. I punteggi *non* sono stati salvat
 SUCCESS_GAME_PAUSED = "⏸ Partita messa in pausa."
 SUCCESS_GAME_RESUMED = "▶️ Partita ripresa!"
 SUCCESS_WINNER = "🏆 *{winner} ha raggiunto {target} punti e vince la partita!*"
+SUCCESS_GAME_CANCELLED = "🗑️ *Partita annullata!* Tutti i dati sono stati eliminati.\nUsa /nuovapartita per ricominciare."
+CONFIRM_CANCEL_GAME = "⚠️ *Sei sicuro di voler annullare l'intera partita?*\nQuesta azione eliminerà tutti i punteggi e lo storico in modo permanente."
 
 INFO_THREE_PLAYER_RULE = """⚠️ *Fase finale (1000 punti raggiunti!)* ⚠️
 

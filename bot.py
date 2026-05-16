@@ -13,7 +13,7 @@ from telegram.ext import (
 from telegram.error import NetworkError, TimedOut
 from dotenv import load_dotenv
 from database import Database
-from messages import INFO_THREE_PLAYER_RULE
+from messages import INFO_THREE_PLAYER_RULE, SUCCESS_GAME_CANCELLED, CONFIRM_CANCEL_GAME
 
 load_dotenv()
 logging.basicConfig(
@@ -392,6 +392,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /pausa — metti la partita in pausa\n"
         "• /riprendi — riprendi una partita in pausa\n"
         "• /classifica — classifica globale 🏆\n"
+        "• /annullapartita — elimina la partita corrente (senza salvarla)\n"
         "• /finegioco — termina e incorona il vincitore\n\n"
         "Per aggiungere un amico che non ha il telefono, usa il suo @username o il nome visualizzato!",
         parse_mode="Markdown",
@@ -1129,6 +1130,60 @@ async def cmd_finegioco(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "\n".join(lines) + final_stats + "\n\nUsa /nuovapartita per una nuova sfida!"
     await update.message.reply_text(text, parse_mode="Markdown")
 
+async def cmd_annulla_partita(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+
+    game = await db.get_active_game(chat.id)
+    if not game:
+        await update.message.reply_text("❌ Nessuna partita attiva da annullare.")
+        return
+    
+    if game["created_by"] != user.id:
+        await update.message.reply_text("❌ Solo chi ha creato la partita può annullarla.")
+        return
+
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Sì, elimina tutto", callback_data="cancel_game:confirm"),
+        InlineKeyboardButton("❌ No, mantieni",      callback_data="cancel_game:keep"),
+    ]])
+    
+    await update.message.reply_text(
+        CONFIRM_CANCEL_GAME,
+        reply_markup=keyboard,
+        parse_mode="Markdown"
+    )
+
+async def cancel_game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    chat_id = query.message.chat_id
+    user_id = query.from_user.id
+    await query.answer()
+
+    action = query.data[len("cancel_game:"):]
+
+    if action == "keep":
+        await query.edit_message_text("↩️ Operazione annullata. La partita prosegue.")
+        return
+
+    if action == "confirm":
+        game = await db.get_active_game(chat_id)
+        if not game:
+            await query.edit_message_text("❌ Errore: partita non trovata.")
+            return
+            
+        if game["created_by"] != user_id:
+            await query.answer("Solo il creatore può confermare l'eliminazione.", show_alert=True)
+            return
+
+        success = await db.cancel_game(game["id"])
+        if success:
+            _clear_session(context, chat_id)
+            context.chat_data.pop(_undo_key(chat_id), None)
+            await query.edit_message_text(SUCCESS_GAME_CANCELLED, parse_mode="Markdown")
+        else:
+            await query.edit_message_text("❌ Errore durante l'eliminazione dal database.")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ERROR HANDLER
@@ -1192,9 +1247,11 @@ def main():
     app.add_handler(CommandHandler("pausa",        cmd_pausa))
     app.add_handler(CommandHandler("riprendi",     cmd_riprendi))
     app.add_handler(CommandHandler("classifica",   cmd_classifica))
+    app.add_handler(CommandHandler("annullapartita", cmd_annulla_partita))
     app.add_handler(CommandHandler("finegioco",    cmd_finegioco))
     app.add_handler(CallbackQueryHandler(numpad_callback, pattern="^mp:"))
     app.add_handler(CallbackQueryHandler(undo_callback,   pattern="^undo:"))
+    app.add_handler(CallbackQueryHandler(cancel_game_callback, pattern="^cancel_game:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_score_handler))
     app.add_error_handler(error_handler)
 

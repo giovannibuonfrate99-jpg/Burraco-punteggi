@@ -161,6 +161,35 @@ class Database:
         # Esegue la pulizia ogni volta che una partita viene conclusa
         await self.cleanup_bad_games()
 
+    async def cancel_game(self, game_id: int):
+        """
+        Elimina completamente una partita e tutti i dati associati.
+        Utile per annullare una sessione senza salvare statistiche.
+        """
+        try:
+            # 1. Otteniamo gli ID delle mani associate per pulire hand_scores
+            res_hands = await self.client.table("hands").select("id").eq("game_id", game_id).execute()
+            hand_ids = [h["id"] for h in res_hands.data] if res_hands.data else []
+
+            if hand_ids:
+                # 2. Elimina i punteggi delle mani
+                await self.client.table("hand_scores").delete().in_("hand_id", hand_ids).execute()
+
+            # 3. Elimina le mani
+            await self.client.table("hands").delete().eq("game_id", game_id).execute()
+
+            # 4. Elimina i giocatori dalla partita
+            await self.client.table("game_players").delete().eq("game_id", game_id).execute()
+
+            # 5. Elimina la partita stessa
+            await self.client.table("games").delete().eq("id", game_id).execute()
+            
+            self.logger.info(f"🗑️ Partita {game_id} eliminata definitivamente.")
+            return True
+        except Exception as e:
+            self.logger.error(f"Errore durante l'annullamento della partita {game_id}: {e}")
+            return False
+
     # ── Giocatori in partita ───────────────────────────────────────────────
 
     async def add_player_to_game(self, game_id: int, player_id: int) -> bool:
