@@ -1284,7 +1284,11 @@ def main():
 
     if use_polling:
         logger.info("🃏 Bot Burraco avviato in polling mode (sviluppo locale)")
-        app.run_polling()
+        # drop_pending_updates=True elimina i messaggi accumulati mentre il bot era spento
+        # ed elimina automaticamente il webhook attivo che causa il conflitto 409.
+        app.run_polling(
+            drop_pending_updates=True
+        )
     else:
         logger.info(f"🃏 Bot Burraco avviato in webhook mode")
         logger.info(f"   Porta: {port}")
