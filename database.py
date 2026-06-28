@@ -527,7 +527,7 @@ class Database:
         res = await self.client.rpc("classifica_coppie_gruppo", {"p_chat_id": chat_id}).execute()
         return self._list(res)
 
-    async def get_head_to_head(self, player1_id: int, player2_id: int, limit: int = 15) -> list[dict]:
+    async def get_head_to_head(self, player1_id: int, player2_id: int) -> list[dict]:
         """Returns finished games where both players participated, with their scores."""
         res1 = await self.client.table("game_players").select("game_id").eq("player_id", player1_id).execute()
         res2 = await self.client.table("game_players").select("game_id").eq("player_id", player2_id).execute()
@@ -546,7 +546,6 @@ class Database:
             .in_("id", shared)
             .eq("status", "finished")
             .order("finished_at", desc=True)
-            .limit(limit)
             .execute()
         )
         if not games_res.data:
