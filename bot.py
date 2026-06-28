@@ -16,12 +16,17 @@ from telegram.error import NetworkError, TimedOut
 from dotenv import load_dotenv
 from database import Database
 from messages import INFO_THREE_PLAYER_RULE, SUCCESS_GAME_CANCELLED, CONFIRM_CANCEL_GAME
-from config import (
-    RATE_LIMIT_SECONDS, SESSION_TIMEOUT_SECONDS, MAX_SCORE,
-    MAX_TARGET_SCORE, TARGET_SCORE_DEFAULT, THREE_PLAYER_SWITCH_SCORE,
-    THREE_PLAYER_TARGET, HISTORY_LIMIT, ELO_DEFAULT,
-)
 from elo import calculate_elo_deltas
+
+RATE_LIMIT_SECONDS       = 5
+SESSION_TIMEOUT_SECONDS  = 30 * 60
+MAX_SCORE                = 500_000
+MAX_TARGET_SCORE         = 99_999
+TARGET_SCORE_DEFAULT     = 2000
+THREE_PLAYER_SWITCH_SCORE = 1000
+THREE_PLAYER_TARGET      = 1505
+HISTORY_LIMIT            = 20
+ELO_DEFAULT              = 1000
 
 load_dotenv()
 logging.basicConfig(
