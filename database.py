@@ -1,7 +1,9 @@
 import os
+import sys
 import re
 import logging
 from datetime import datetime, timezone
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from supabase import acreate_client, AsyncClient
 from dotenv import load_dotenv
 from config import TARGET_SCORE_DEFAULT
