@@ -16,7 +16,7 @@ from telegram.error import NetworkError, TimedOut
 from dotenv import load_dotenv
 from database import Database
 from messages import INFO_THREE_PLAYER_RULE, SUCCESS_GAME_CANCELLED, CONFIRM_CANCEL_GAME
-from elo import calculate_elo_deltas
+from database import calculate_elo_deltas
 
 RATE_LIMIT_SECONDS       = 5
 SESSION_TIMEOUT_SECONDS  = 30 * 60

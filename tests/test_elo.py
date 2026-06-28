@@ -1,5 +1,5 @@
 import pytest
-from elo import calculate_elo_deltas, expected_score, get_k_factor, _detect_teams
+from database import calculate_elo_deltas, _expected_score as expected_score, _get_k_factor as get_k_factor, _detect_teams
 
 
 class TestKFactor:
