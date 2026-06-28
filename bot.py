@@ -1291,6 +1291,62 @@ async def cancel_game_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# /confronta
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def cmd_confronta(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "Uso: /confronta <giocatore1> <giocatore2>\n"
+            "Esempio: /confronta @mario @luigi"
+        )
+        return
+
+    name1 = context.args[0].lstrip("@")
+    name2 = context.args[1].lstrip("@")
+
+    p1 = await db.get_player_by_username_or_name(name1)
+    p2 = await db.get_player_by_username_or_name(name2)
+
+    if not p1:
+        await update.message.reply_text(f"❌ Giocatore '{name1}' non trovato.")
+        return
+    if not p2:
+        await update.message.reply_text(f"❌ Giocatore '{name2}' non trovato.")
+        return
+    if p1["telegram_id"] == p2["telegram_id"]:
+        await update.message.reply_text("❌ Inserisci due giocatori diversi.")
+        return
+
+    games = await db.get_head_to_head(p1["telegram_id"], p2["telegram_id"])
+    n1, n2 = p1["display_name"], p2["display_name"]
+
+    if not games:
+        await update.message.reply_text(f"Nessuna partita in comune tra {n1} e {n2}.")
+        return
+
+    p1_better = sum(1 for g in games if g["p1_score"] > g["p2_score"])
+    p2_better = sum(1 for g in games if g["p2_score"] > g["p1_score"])
+    pari      = len(games) - p1_better - p2_better
+
+    lines = [f"⚔️ *{n1} vs {n2}*\n_{len(games)} partite in comune_\n"]
+
+    for g in games:
+        raw_date = g["finished_at"] or ""
+        parts    = raw_date[:10].split("-")
+        date     = f"{parts[2]}/{parts[1]}" if len(parts) == 3 else "?"
+        s1, s2   = g["p1_score"], g["p2_score"]
+        w1       = " 🏆" if s1 > s2 else ""
+        w2       = " 🏆" if s2 > s1 else ""
+        lines.append(f"📅 {date}  —  *{s1}*{w1} vs *{s2}*{w2}")
+
+    bilancio = f"{p1_better}–{p2_better}" + (f"–{pari} (pari)" if pari else "")
+    lines.append(f"\n🏅 *Bilancio: {n1} {bilancio} {n2}*")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # /regole_elo
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1448,6 +1504,7 @@ def main():
     app.add_handler(CommandHandler("elo",          cmd_elo))
     app.add_handler(CommandHandler("regole_elo",   cmd_regole_elo))
     app.add_handler(CommandHandler("recalcolaelo", cmd_recalcola_elo))
+    app.add_handler(CommandHandler("confronta",   cmd_confronta))
     app.add_handler(CommandHandler("annullapartita", cmd_annulla_partita))
     app.add_handler(CommandHandler("finegioco",    cmd_finegioco))
     app.add_handler(CallbackQueryHandler(numpad_callback, pattern="^mp:"))

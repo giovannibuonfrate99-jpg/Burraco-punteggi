@@ -527,6 +527,60 @@ class Database:
         res = await self.client.rpc("classifica_coppie_gruppo", {"p_chat_id": chat_id}).execute()
         return self._list(res)
 
+    async def get_head_to_head(self, player1_id: int, player2_id: int, limit: int = 15) -> list[dict]:
+        """Returns finished games where both players participated, with their scores."""
+        res1 = await self.client.table("game_players").select("game_id").eq("player_id", player1_id).execute()
+        res2 = await self.client.table("game_players").select("game_id").eq("player_id", player2_id).execute()
+        if not res1.data or not res2.data:
+            return []
+
+        ids1 = {r["game_id"] for r in res1.data}
+        ids2 = {r["game_id"] for r in res2.data}
+        shared = list(ids1 & ids2)
+        if not shared:
+            return []
+
+        games_res = await (
+            self.client.table("games")
+            .select("id, finished_at")
+            .in_("id", shared)
+            .eq("status", "finished")
+            .order("finished_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        if not games_res.data:
+            return []
+
+        finished_ids = [g["id"] for g in games_res.data]
+        games_map = {g["id"]: g for g in games_res.data}
+
+        scores_res = await (
+            self.client.table("game_players")
+            .select("game_id, player_id, total_score")
+            .in_("game_id", finished_ids)
+            .in_("player_id", [player1_id, player2_id])
+            .execute()
+        )
+
+        scores_by_game: dict[int, dict[int, int]] = {}
+        for s in self._list(scores_res):
+            scores_by_game.setdefault(s["game_id"], {})[s["player_id"]] = s["total_score"]
+
+        result = []
+        for gid in finished_ids:
+            p1s = scores_by_game.get(gid, {}).get(player1_id)
+            p2s = scores_by_game.get(gid, {}).get(player2_id)
+            if p1s is None or p2s is None:
+                continue
+            result.append({
+                "game_id":     gid,
+                "finished_at": games_map[gid]["finished_at"],
+                "p1_score":    p1s,
+                "p2_score":    p2s,
+            })
+        return result
+
     # ── ELO ───────────────────────────────────────────────────────────────────
 
     async def get_player_elo_data(self, player_ids: list[int]) -> dict[int, dict]:
