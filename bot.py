@@ -1291,6 +1291,36 @@ async def cancel_game_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# /regole_elo
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def cmd_regole_elo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "⭐ *Come funziona l'ELO?*\n\n"
+        "L'ELO è un punteggio personale che misura la tua forza come giocatore. "
+        "Tutti partono da *1000 punti*.\n\n"
+        "📈 *Quando sale?*\n"
+        "Quando vinci. Più forte è l'avversario che batti, più punti guadagni.\n\n"
+        "📉 *Quando scende?*\n"
+        "Quando perdi. Ma se perdi contro qualcuno molto più forte di te, "
+        "perdi pochi punti — era normale perdere.\n\n"
+        "⚖️ *Esempio pratico*\n"
+        "• Batti qualcuno con ELO simile al tuo → *+16*\n"
+        "• Batti qualcuno molto più forte → *+26*\n"
+        "• Batti qualcuno molto più debole → *+6*\n"
+        "• Perdi contro qualcuno simile → *-16*\n\n"
+        "🚀 *All'inizio cambia più velocemente*\n"
+        "Nelle prime 10 partite l'ELO si aggiusta rapidamente per trovare "
+        "il tuo livello reale. Poi si stabilizza.\n\n"
+        "🤝 *Partite in coppia*\n"
+        "Valgono per l'ELO! Ogni giocatore viene confrontato solo con gli "
+        "avversari, non col proprio compagno.\n\n"
+        "📊 Usa /elo per vedere la classifica."
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # /elo
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1416,6 +1446,7 @@ def main():
     app.add_handler(CommandHandler("riprendi",     cmd_riprendi))
     app.add_handler(CommandHandler("classifica",   cmd_classifica))
     app.add_handler(CommandHandler("elo",          cmd_elo))
+    app.add_handler(CommandHandler("regole_elo",   cmd_regole_elo))
     app.add_handler(CommandHandler("recalcolaelo", cmd_recalcola_elo))
     app.add_handler(CommandHandler("annullapartita", cmd_annulla_partita))
     app.add_handler(CommandHandler("finegioco",    cmd_finegioco))
