@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timezone
 from supabase import acreate_client, AsyncClient
 from dotenv import load_dotenv
+from config import TARGET_SCORE_DEFAULT
 
 load_dotenv()
 
@@ -13,15 +14,15 @@ class Database:
     async def get_player_by_username_or_name(self, username_or_name: str):
         # Rimuove caratteri che potrebbero iniettare operatori PostgREST nel filtro .or_()
         safe = re.sub(r"[^\w\s\-]", "", username_or_name)[:64]
-        # Cerca usando ilike per rendere la ricerca case-insensitive
+        # Usa wildcards % per ricerca case-insensitive per sottostringa
         res = await (
             self.client.table("players")
             .select("*")
-            .or_(f"username.ilike.{safe},display_name.ilike.{safe}")
+            .or_(f"username.ilike.%{safe}%,display_name.ilike.%{safe}%")
             .limit(1)
             .execute()
         )
-        return res.data[0] if res.data else None
+        return self._first(res)
     
     def __init__(self):
         self.url: str = os.environ.get("SUPABASE_URL", "")
@@ -30,6 +31,14 @@ class Database:
             raise ValueError("SUPABASE_URL e SUPABASE_KEY devono essere impostati nel .env")
         self.client: AsyncClient | None = None
         self.logger = logging.getLogger("Database")
+
+    @staticmethod
+    def _first(res) -> dict | None:
+        return res.data[0] if res.data else None
+
+    @staticmethod
+    def _list(res) -> list:
+        return res.data or []
 
     async def connect(self):
         """Crea il client asincrono Supabase. Va chiamato una volta all'avvio."""
@@ -56,11 +65,11 @@ class Database:
             .limit(1)
             .execute()
         )
-        return res.data[0] if res.data else None
+        return self._first(res)
 
     # ── Partite ────────────────────────────────────────────────────────────
 
-    async def create_game(self, chat_id: int, chat_title: str, created_by: int, target_score: int = 2000):
+    async def create_game(self, chat_id: int, chat_title: str, created_by: int, target_score: int = TARGET_SCORE_DEFAULT):
         self.logger.info(f"[create_game] chat_id={chat_id}")
         res = await (
             self.client.table("games")
@@ -73,7 +82,7 @@ class Database:
             })
             .execute()
         )
-        return res.data[0] if res.data else None
+        return self._first(res)
 
     async def get_active_game(self, chat_id: int):
         """
@@ -90,7 +99,7 @@ class Database:
             .limit(1)
             .execute()
         )
-        return res.data[0] if res.data else None
+        return self._first(res)
 
     async def start_game(self, game_id: int):
         await (
@@ -215,7 +224,7 @@ class Database:
             .order("total_score", desc=True)
             .execute()
         )
-        return res.data or []
+        return self._list(res)
 
     async def is_in_game(self, game_id: int, player_id: int) -> bool:
         res = await (
@@ -410,25 +419,25 @@ class Database:
             .order("hand_number")
             .execute()
         )
-        return res.data or []
+        return self._list(res)
 
     # ── Classifica globale ────────────────────────────────────────────────
 
     async def get_classifica_globale(self):
         res = await self.client.table("classifica_globale").select("*").execute()
-        return res.data or []
+        return self._list(res)
 
     async def get_classifica_coppie(self):
         res = await self.client.table("classifica_coppie").select("*").execute()
-        return res.data or []
+        return self._list(res)
 
     async def get_classifica_per_gruppo(self, chat_id: int) -> list:
         res = await self.client.rpc("classifica_gruppo", {"p_chat_id": chat_id}).execute()
-        return res.data or []
+        return self._list(res)
 
     async def get_classifica_coppie_per_gruppo(self, chat_id: int) -> list:
         res = await self.client.rpc("classifica_coppie_gruppo", {"p_chat_id": chat_id}).execute()
-        return res.data or []
+        return self._list(res)
 
     # ── Pulizia dati ──────────────────────────────────────────────────────
 

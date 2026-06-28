@@ -3,6 +3,7 @@ import os
 import logging
 import sys
 from datetime import datetime, timezone
+from enum import Enum
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 import re
@@ -15,6 +16,11 @@ from telegram.error import NetworkError, TimedOut
 from dotenv import load_dotenv
 from database import Database
 from messages import INFO_THREE_PLAYER_RULE, SUCCESS_GAME_CANCELLED, CONFIRM_CANCEL_GAME
+from config import (
+    RATE_LIMIT_SECONDS, SESSION_TIMEOUT_SECONDS, MAX_SCORE,
+    MAX_TARGET_SCORE, TARGET_SCORE_DEFAULT, THREE_PLAYER_SWITCH_SCORE,
+    THREE_PLAYER_TARGET, HISTORY_LIMIT,
+)
 
 load_dotenv()
 logging.basicConfig(
@@ -44,7 +50,7 @@ def _validate_environment():
 _validate_environment()
 
 db = Database()
-TARGET_SCORE = int(os.getenv("TARGET_SCORE", 2000))
+TARGET_SCORE = int(os.getenv("TARGET_SCORE", TARGET_SCORE_DEFAULT))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -53,7 +59,6 @@ TARGET_SCORE = int(os.getenv("TARGET_SCORE", 2000))
 # Format: {(chat_id, user_id): timestamp_last_mano_command}
 _rate_limits: dict[tuple[int, int], float] = {}
 _rate_limit_lock = asyncio.Lock()
-RATE_LIMIT_SECONDS = 5  # Max 1 /mano ogni 5 secondi per utente
 
 async def _check_rate_limit(chat_id: int, user_id: int) -> tuple[bool, str]:
     """
@@ -95,7 +100,7 @@ def _check_session_timeout(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
     now = datetime.now(timezone.utc).timestamp()
     age = now - session["created_at"]
     
-    if age > 30 * 60:  # 30 minuti
+    if age > SESSION_TIMEOUT_SECONDS:
         _clear_session(context, chat_id)
         return False
     
@@ -162,7 +167,7 @@ def _validate_score_input(raw_input: str) -> tuple[bool, int | None, str]:
         score = int(raw_input)
         
         # Validazione limiti ragionevoli
-        if abs(score) > 500000:
+        if abs(score) > MAX_SCORE:
             return False, None, "⚠️ Punteggio troppo alto! Max ±500.000"
         
         return True, score, ""
@@ -193,6 +198,12 @@ def _parse_callback_safe(callback_data: str, prefix: str) -> tuple[bool, str]:
     except (IndexError, AttributeError) as e:
         logger.warning(f"Malformed callback data: {callback_data} — {e}")
         return False, ""
+
+
+class InputState(Enum):
+    PANEL = "panel"
+    EDITING = "editing"
+    HISTORY = "history"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -288,9 +299,9 @@ async def _build_history_text(game_id: int, pids: list, players_info: dict) -> s
     lines   = ["📜 *Storico mani*\n"]
     display = hands
 
-    if len(hands) > 20:
-        lines.append(f"_(ultime 20 di {len(hands)} mani)_\n")
-        display = hands[-20:]
+    if len(hands) > HISTORY_LIMIT:
+        lines.append(f"_(ultime {HISTORY_LIMIT} di {len(hands)} mani)_\n")
+        display = hands[-HISTORY_LIMIT:]
 
     for hand in display:
         scores_map = {hs["player_id"]: hs["punteggio_mano"] for hs in hand["hand_scores"]}
@@ -349,7 +360,7 @@ async def _build_final_stats(game: dict, players_info: dict) -> str:
         hours, remainder = divmod(int(delta.total_seconds()), 3600)
         minutes = remainder // 60
         duration_str = f"{hours}h {minutes}m" if hours else f"{minutes}m"
-    except Exception:
+    except (ValueError, TypeError, OverflowError):
         duration_str = "N/D"
 
     lines = [
@@ -414,7 +425,7 @@ async def cmd_nuova_partita(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
         try:
             target = int(context.args[0])
-            if target <= 0 or target > 99_999:
+            if target <= 0 or target > MAX_TARGET_SCORE:
                 await update.message.reply_text(
                     "❌ Il punteggio obiettivo deve essere tra 1 e 99.999.\n"
                     "Esempio: /nuovapartita 3000"
@@ -548,8 +559,8 @@ async def cmd_inizia(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Se sono in 3 e il punteggio è quello di default, imposta a 1505
     if len(players) == 3 and game["target_score"] == TARGET_SCORE:
-        await db.update_game_target_score(game["id"], 1505)
-        game["target_score"] = 1505
+        await db.update_game_target_score(game["id"], THREE_PLAYER_TARGET)
+        game["target_score"] = THREE_PLAYER_TARGET
 
     await db.start_game(game["id"])
     names = [p["players"]["display_name"] for p in players]
@@ -612,7 +623,7 @@ async def cmd_mano(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "players":      pids,
         "players_info": {p["player_id"]: p["players"]["display_name"] for p in players},
         "scored":       {pid: None for pid in pids},
-        "state":        "panel",
+        "state":        InputState.PANEL,
         "editing_pid":  None,
         "input":        "",
         "msg_id":       None,
@@ -644,7 +655,7 @@ async def numpad_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer()
     action = query.data[len("mp:"):]
-    state  = session.get("state", "panel")
+    state  = session.get("state", InputState.PANEL)
 
     # ── Azioni disponibili in qualunque stato ─────────────────────────────
 
@@ -659,7 +670,7 @@ async def numpad_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "back_panel":
         # Funziona sia da 'editing' che da 'history'
-        session["state"]       = "panel"
+        session["state"]       = InputState.PANEL
         session["editing_pid"] = None
         session["input"]       = ""
         _set_session(context, chat_id, session)
@@ -672,11 +683,11 @@ async def numpad_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Stato PANEL ───────────────────────────────────────────────────────
 
-    if state == "panel":
+    if state == InputState.PANEL:
 
         if action.startswith("edit:"):
             pid = int(action[len("edit:"):])
-            session["state"]       = "editing"
+            session["state"]       = InputState.EDITING
             session["editing_pid"] = pid
             session["input"]       = ""
             _set_session(context, chat_id, session)
@@ -705,7 +716,7 @@ async def numpad_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if action == "history":
-            session["state"] = "history"
+            session["state"] = InputState.HISTORY
             _set_session(context, chat_id, session)
             text = await _build_history_text(
                 session["game"]["id"],
@@ -734,7 +745,7 @@ async def text_score_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     session = _get_session(context, chat_id)
 
     # Ignora se non c'è una sessione attiva in fase di editing
-    if not session or session.get("state") != "editing":
+    if not session or session.get("state") != InputState.EDITING:
         return
 
     raw = update.message.text.strip()
@@ -743,7 +754,7 @@ async def text_score_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         await update.message.delete()
     except Exception:
-        pass
+        logger.debug("Impossibile eliminare il messaggio utente (permesso negato o già cancellato)")
 
     # Validazione usando la nuova funzione safe
     is_valid, score, error_msg = _validate_score_input(raw)
@@ -763,7 +774,7 @@ async def text_score_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     pid   = session["editing_pid"]
     session["scored"][pid] = score
-    session["state"]       = "panel"
+    session["state"]       = InputState.PANEL
     session["editing_pid"] = None
     session["input"]       = ""
     _set_session(context, chat_id, session)
@@ -826,7 +837,7 @@ async def _commit_hand_and_recap(session: dict, game: dict) -> tuple[str, bool]:
         text   = "\n".join(lines)
 
         # Mostra la regola dei 3 giocatori solo se sono in 3 e almeno uno ha >= 1000 punti
-        if len(players) == 3 and any(p["total_score"] >= 1000 for p in players):
+        if len(players) == 3 and any(p["total_score"] >= THREE_PLAYER_SWITCH_SCORE for p in players):
             text += "\n" + INFO_THREE_PLAYER_RULE
 
         if winners:
@@ -1269,6 +1280,11 @@ def main():
 
     # Se l'URL non è HTTPS, usa polling invece del webhook
     use_polling = base_url.startswith("http://localhost") or not base_url.startswith("https://")
+    if use_polling and base_url and not base_url.startswith("http://localhost"):
+        logger.warning(
+            f"Fallback a polling: RENDER_EXTERNAL_URL non è HTTPS ({base_url!r}). "
+            "Imposta un URL HTTPS per usare il webhook in produzione."
+        )
 
     persistence = PicklePersistence(filepath="burraco_bot_data.pkl")
 
