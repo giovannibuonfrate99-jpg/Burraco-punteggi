@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 from datetime import datetime, timezone
 from supabase import acreate_client, AsyncClient
@@ -10,11 +11,13 @@ load_dotenv()
 class Database:
 
     async def get_player_by_username_or_name(self, username_or_name: str):
+        # Rimuove caratteri che potrebbero iniettare operatori PostgREST nel filtro .or_()
+        safe = re.sub(r"[^\w\s\-]", "", username_or_name)[:64]
         # Cerca usando ilike per rendere la ricerca case-insensitive
         res = await (
             self.client.table("players")
             .select("*")
-            .or_(f"username.ilike.{username_or_name},display_name.ilike.{username_or_name}")
+            .or_(f"username.ilike.{safe},display_name.ilike.{safe}")
             .limit(1)
             .execute()
         )

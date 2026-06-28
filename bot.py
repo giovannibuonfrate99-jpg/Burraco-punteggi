@@ -1,3 +1,4 @@
+import asyncio
 import os
 import logging
 import sys
@@ -50,13 +51,14 @@ TARGET_SCORE = int(os.getenv("TARGET_SCORE", 2000))
 # RATE LIMITING (anti-spam)
 # ══════════════════════════════════════════════════════════════════════════════
 # Format: {(chat_id, user_id): timestamp_last_mano_command}
-_rate_limits = {}
+_rate_limits: dict[tuple[int, int], float] = {}
+_rate_limit_lock = asyncio.Lock()
 RATE_LIMIT_SECONDS = 5  # Max 1 /mano ogni 5 secondi per utente
 
-def _check_rate_limit(chat_id: int, user_id: int) -> tuple[bool, str]:
+async def _check_rate_limit(chat_id: int, user_id: int) -> tuple[bool, str]:
     """
     Verifica se l'utente ha superato il rate limit su /mano.
-    
+
     Returns:
         (is_allowed: bool, message: str)
         is_allowed=True se l'utente può procedere
@@ -64,13 +66,12 @@ def _check_rate_limit(chat_id: int, user_id: int) -> tuple[bool, str]:
     """
     key = (chat_id, user_id)
     now = datetime.now(timezone.utc).timestamp()
-    last_call = _rate_limits.get(key, 0)
-    
-    if now - last_call < RATE_LIMIT_SECONDS:
-        remaining = int(RATE_LIMIT_SECONDS - (now - last_call)) + 1
-        return False, f"⏳ Aspetta ancora {remaining}s prima del prossimo /mano"
-    
-    _rate_limits[key] = now
+    async with _rate_limit_lock:
+        last_call = _rate_limits.get(key, 0)
+        if now - last_call < RATE_LIMIT_SECONDS:
+            remaining = int(RATE_LIMIT_SECONDS - (now - last_call)) + 1
+            return False, f"⏳ Aspetta ancora {remaining}s prima del prossimo /mano"
+        _rate_limits[key] = now
     return True, ""
 
 def _check_session_timeout(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
@@ -463,6 +464,9 @@ async def cmd_unisciti(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Uniamo tutti gli argomenti per gestire nomi completi (es. "Mario Rossi")
         target_input = " ".join(args)
         target_name = target_input.lstrip("@")
+        if len(target_name) > 64:
+            await update.message.reply_text("❌ Nome utente troppo lungo (max 64 caratteri).")
+            return
         # Cerca utente per username o display_name
         target_player = await db.get_player_by_username_or_name(target_name)
         if not target_player:
@@ -567,7 +571,7 @@ async def cmd_mano(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     
     # ── Rate limiting: max 1 /mano ogni 5 secondi
-    allowed, error_msg = _check_rate_limit(chat.id, user.id)
+    allowed, error_msg = await _check_rate_limit(chat.id, user.id)
     if not allowed:
         await update.message.reply_text(f"⏳ {error_msg}")
         return
@@ -909,6 +913,9 @@ async def cmd_annulla_mano(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if game["status"] == "waiting":
         await update.message.reply_text("❌ La partita non è ancora iniziata, nessuna mano da annullare.")
+        return
+    if game["created_by"] != user.id:
+        await update.message.reply_text("❌ Solo chi ha creato la partita può annullare una mano.")
         return
 
     hand, scores = await db.get_last_hand(game["id"])
