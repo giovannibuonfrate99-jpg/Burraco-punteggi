@@ -1,7 +1,6 @@
-import os
-import sys
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from config import ELO_K_HIGH, ELO_K_MID, ELO_K_LOW
+ELO_K_HIGH = 40
+ELO_K_MID  = 32
+ELO_K_LOW  = 24
 
 
 def get_k_factor(games_played: int) -> int:

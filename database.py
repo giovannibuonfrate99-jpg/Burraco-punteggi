@@ -1,12 +1,12 @@
 import os
-import sys
 import re
 import logging
 from datetime import datetime, timezone
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from supabase import acreate_client, AsyncClient
 from dotenv import load_dotenv
-from config import TARGET_SCORE_DEFAULT
+
+TARGET_SCORE_DEFAULT = 2000
+ELO_DEFAULT = 1000
 
 load_dotenv()
 
@@ -445,7 +445,6 @@ class Database:
 
     async def get_player_elo_data(self, player_ids: list[int]) -> dict[int, dict]:
         """Returns {player_id: {"elo": int, "games_played": int}} for given players."""
-        from config import ELO_DEFAULT
         if not player_ids:
             return {}
         res = await (
