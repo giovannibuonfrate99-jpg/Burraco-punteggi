@@ -1083,15 +1083,27 @@ async def cmd_punteggi(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def cmd_classifica(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    individual = await db.get_classifica_globale()
-    coppie     = await db.get_classifica_coppie()
-    
+    chat      = update.effective_chat
+    is_global = bool(context.args and context.args[0].lower() == "globale")
+
+    if is_global:
+        individual = await db.get_classifica_globale()
+        coppie     = await db.get_classifica_coppie()
+        title      = "🌍 *RANKING GLOBALE BURRACO*"
+    else:
+        individual = await db.get_classifica_per_gruppo(chat.id)
+        coppie     = await db.get_classifica_coppie_per_gruppo(chat.id)
+        title      = "🏆 *RANKING BURRACO — questo gruppo*"
+
     if not individual:
-        await update.message.reply_text("Nessuna partita conclusa ancora! 🃏")
+        msg = "Nessuna partita conclusa ancora! 🃏"
+        if not is_global:
+            msg += "\n_Usa /classifica globale per le statistiche di tutti i gruppi._"
+        await update.message.reply_text(msg, parse_mode="Markdown")
         return
 
-    text = "🏆 *RANKING BURRACO*\n\n"
-    
+    text = title + "\n\n"
+
     # --- Sezione Individuale ---
     text += "👤 *Top Giocatori*\n"
     text += "```\n"
@@ -1116,6 +1128,8 @@ async def cmd_classifica(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += "```\n"
 
     text += "\n_P: Partite | V: Vittorie | WR: Win Rate %_"
+    if not is_global:
+        text += "\n_/classifica globale per le statistiche di tutti i gruppi._"
     await update.message.reply_text(text, parse_mode="Markdown")
 
 

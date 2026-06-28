@@ -99,6 +99,70 @@ GROUP BY name1, name2
 ORDER BY vittorie DESC, giocate ASC;
 
 -- ═════════════════════════════════════════════════════════════════════════════
+-- RPC: Classifica per singolo gruppo (usata da /classifica senza argomenti)
+-- ═════════════════════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION classifica_gruppo(p_chat_id BIGINT)
+RETURNS TABLE(display_name TEXT, telegram_id BIGINT, partite_giocate BIGINT,
+              vittorie BIGINT, media_punti INTEGER, win_rate INTEGER)
+LANGUAGE sql AS $$
+  WITH stats AS (
+    SELECT
+      p.display_name,
+      p.telegram_id,
+      COUNT(DISTINCT g.id) AS partite_giocate,
+      COUNT(DISTINCT g.id) FILTER (
+        WHERE g.status = 'finished' AND gp.total_score = (
+          SELECT MAX(gp2.total_score) FROM game_players gp2 WHERE gp2.game_id = g.id
+        )
+      ) AS vittorie,
+      COALESCE(AVG(gp.total_score), 0)::INTEGER AS media_punti
+    FROM players p
+    LEFT JOIN game_players gp ON gp.player_id = p.telegram_id
+    LEFT JOIN games g ON g.id = gp.game_id
+                      AND g.status = 'finished'
+                      AND g.chat_id = p_chat_id
+    GROUP BY p.telegram_id, p.display_name
+  )
+  SELECT
+    display_name, telegram_id, partite_giocate, vittorie, media_punti,
+    CASE WHEN partite_giocate > 0
+      THEN ROUND((vittorie::float / partite_giocate) * 100)::INTEGER
+      ELSE 0
+    END AS win_rate
+  FROM stats
+  WHERE partite_giocate > 0
+  ORDER BY vittorie DESC, media_punti DESC;
+$$;
+
+CREATE OR REPLACE FUNCTION classifica_coppie_gruppo(p_chat_id BIGINT)
+RETURNS TABLE(coppia TEXT, giocate BIGINT, vittorie BIGINT)
+LANGUAGE sql AS $$
+  WITH pair_matches AS (
+    SELECT
+      g.id AS game_id,
+      p1.display_name AS name1,
+      p2.display_name AS name2,
+      (gp1.total_score = (SELECT MAX(gp2b.total_score) FROM game_players gp2b WHERE gp2b.game_id = g.id)) AS won
+    FROM games g
+    JOIN game_players gp1 ON g.id = gp1.game_id
+    JOIN game_players gp2 ON g.id = gp2.game_id AND gp1.player_id < gp2.player_id
+    JOIN players p1 ON gp1.player_id = p1.telegram_id
+    JOIN players p2 ON gp2.player_id = p2.telegram_id
+    WHERE g.status = 'finished'
+      AND g.chat_id = p_chat_id
+      AND gp1.total_score = gp2.total_score
+      AND (SELECT COUNT(*) FROM game_players WHERE game_id = g.id) = 4
+  )
+  SELECT
+    name1 || ' & ' || name2 AS coppia,
+    COUNT(*) AS giocate,
+    COUNT(*) FILTER (WHERE won) AS vittorie
+  FROM pair_matches
+  GROUP BY name1, name2
+  ORDER BY vittorie DESC, giocate ASC;
+$$;
+
+-- ═════════════════════════════════════════════════════════════════════════════
 -- RPC: Aggiorna punteggio in modo atomico (anti-race-condition)
 -- ═════════════════════════════════════════════════════════════════════════════
 CREATE OR REPLACE FUNCTION update_score_atomic(

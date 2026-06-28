@@ -422,6 +422,14 @@ class Database:
         res = await self.client.table("classifica_coppie").select("*").execute()
         return res.data or []
 
+    async def get_classifica_per_gruppo(self, chat_id: int) -> list:
+        res = await self.client.rpc("classifica_gruppo", {"p_chat_id": chat_id}).execute()
+        return res.data or []
+
+    async def get_classifica_coppie_per_gruppo(self, chat_id: int) -> list:
+        res = await self.client.rpc("classifica_coppie_gruppo", {"p_chat_id": chat_id}).execute()
+        return res.data or []
+
     # ── Pulizia dati ──────────────────────────────────────────────────────
 
     async def delete_all_data_except_players(self):
