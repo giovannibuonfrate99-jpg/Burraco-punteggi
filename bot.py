@@ -1297,13 +1297,22 @@ async def cancel_game_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 async def cmd_confronta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args or len(context.args) < 2:
         await update.message.reply_text(
-            "Uso: /confronta <giocatore1> <giocatore2>\n"
-            "Esempio: /confronta @mario @luigi"
+            "Uso: /confronta <giocatore1> <giocatore2> [numero]\n"
+            "Esempio: /confronta @mario @luigi\n"
+            "Esempio: /confronta @mario @luigi 50"
         )
         return
 
     name1 = context.args[0].lstrip("@")
     name2 = context.args[1].lstrip("@")
+
+    limit = 20
+    if len(context.args) >= 3:
+        try:
+            limit = max(1, min(int(context.args[2]), 200))
+        except ValueError:
+            await update.message.reply_text("❌ Il numero di partite deve essere un intero (es. 50).")
+            return
 
     p1 = await db.get_player_by_username_or_name(name1)
     p2 = await db.get_player_by_username_or_name(name2)
@@ -1318,7 +1327,7 @@ async def cmd_confronta(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Inserisci due giocatori diversi.")
         return
 
-    games = await db.get_head_to_head(p1["telegram_id"], p2["telegram_id"])
+    games = await db.get_head_to_head(p1["telegram_id"], p2["telegram_id"], limit=limit)
     n1, n2 = p1["display_name"], p2["display_name"]
 
     if not games:
