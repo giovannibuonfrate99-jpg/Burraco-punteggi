@@ -6,3 +6,8 @@ TARGET_SCORE_DEFAULT = 2000
 THREE_PLAYER_SWITCH_SCORE = 1000
 THREE_PLAYER_TARGET = 1505
 HISTORY_LIMIT = 20
+
+ELO_DEFAULT = 1000
+ELO_K_HIGH = 40   # prime 10 partite: calibrazione veloce
+ELO_K_MID  = 32   # partite 10-29: transizione
+ELO_K_LOW  = 24   # da 30 partite: rating stabile

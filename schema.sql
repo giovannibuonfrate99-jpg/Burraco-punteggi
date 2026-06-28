@@ -219,3 +219,48 @@ FOR ALL USING (true) WITH CHECK (true);
 -- Hand Scores: Permetti tutte le operazioni
 CREATE POLICY "hand_scores_allow_all" ON hand_scores
 FOR ALL USING (true) WITH CHECK (true);
+
+-- ═════════════════════════════════════════════════════════════════════════════
+-- Sistema ELO
+-- ═════════════════════════════════════════════════════════════════════════════
+
+-- Rating ELO corrente per giocatore (aggiornato dopo ogni partita)
+CREATE TABLE IF NOT EXISTS player_elo (
+    player_id   BIGINT PRIMARY KEY REFERENCES players(telegram_id),
+    elo         INTEGER NOT NULL DEFAULT 1000,
+    games_played INTEGER NOT NULL DEFAULT 0,
+    updated_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Storico variazioni ELO partita per partita
+CREATE TABLE IF NOT EXISTS elo_history (
+    id         SERIAL PRIMARY KEY,
+    player_id  BIGINT REFERENCES players(telegram_id),
+    game_id    INTEGER REFERENCES games(id) ON DELETE CASCADE,
+    elo_before INTEGER NOT NULL,
+    elo_after  INTEGER NOT NULL,
+    delta      INTEGER NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Vista classifica ELO globale
+CREATE OR REPLACE VIEW classifica_elo AS
+SELECT
+    p.display_name,
+    p.telegram_id,
+    pe.elo,
+    pe.games_played,
+    pe.updated_at
+FROM player_elo pe
+JOIN players p ON p.telegram_id = pe.player_id
+WHERE pe.games_played > 0
+ORDER BY pe.elo DESC;
+
+ALTER TABLE IF EXISTS player_elo ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS elo_history ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "player_elo_allow_all" ON player_elo
+FOR ALL USING (true) WITH CHECK (true);
+
+CREATE POLICY "elo_history_allow_all" ON elo_history
+FOR ALL USING (true) WITH CHECK (true);

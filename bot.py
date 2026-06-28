@@ -19,8 +19,9 @@ from messages import INFO_THREE_PLAYER_RULE, SUCCESS_GAME_CANCELLED, CONFIRM_CAN
 from config import (
     RATE_LIMIT_SECONDS, SESSION_TIMEOUT_SECONDS, MAX_SCORE,
     MAX_TARGET_SCORE, TARGET_SCORE_DEFAULT, THREE_PLAYER_SWITCH_SCORE,
-    THREE_PLAYER_TARGET, HISTORY_LIMIT,
+    THREE_PLAYER_TARGET, HISTORY_LIMIT, ELO_DEFAULT,
 )
+from elo import calculate_elo_deltas
 
 load_dotenv()
 logging.basicConfig(
@@ -793,6 +794,42 @@ async def text_score_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ELO HELPER
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def _apply_and_format_elo(game_id: int, players: list[dict]) -> str:
+    """Calculate, persist and format ELO changes for all players of a finished game."""
+    try:
+        player_ids = [p["player_id"] for p in players]
+        elo_data   = await db.get_player_elo_data(player_ids)
+        players_input = [
+            {
+                "player_id":   p["player_id"],
+                "total_score": p["total_score"],
+                "elo":         elo_data[p["player_id"]]["elo"],
+                "games_played": elo_data[p["player_id"]]["games_played"],
+            }
+            for p in players
+        ]
+        deltas = calculate_elo_deltas(players_input)
+        await db.apply_elo_updates(game_id, deltas, elo_data)
+
+        lines = ["📊 *Variazione ELO*"]
+        for p in sorted(players, key=lambda x: deltas.get(x["player_id"], 0), reverse=True):
+            pid    = p["player_id"]
+            name   = p["players"]["display_name"]
+            before = elo_data[pid]["elo"]
+            delta  = deltas[pid]
+            after  = before + delta
+            sign   = "+" if delta >= 0 else ""
+            lines.append(f"• {name}: {before} → *{after}* ({sign}{delta})")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error(f"Errore nell'aggiornamento ELO per partita {game_id}: {e}", exc_info=True)
+        return ""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # COMMIT MANO + RIEPILOGO
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -844,13 +881,15 @@ async def _commit_hand_and_recap(session: dict, game: dict) -> tuple[str, bool]:
             w_names      = ", ".join([w["players"]["display_name"] for w in winners])
             winfo        = {p["player_id"]: p["players"]["display_name"] for p in players}
             final_stats  = await _build_final_stats(game, winfo)
+            await db.finish_game(game["id"], winners[0]["player_id"])
+            elo_text     = await _apply_and_format_elo(game["id"], players)
             verb = "ha" if len(winners) == 1 else "hanno"
             win_verb = "vince" if len(winners) == 1 else "vincono"
+            elo_section = f"\n\n{elo_text}" if elo_text else ""
             text += (
                 f"\n\n🏆 *{w_names} {verb} raggiunto {max_score} punti e {win_verb} la partita!*"
-                f"{final_stats}\n\nUsa /nuovapartita per una nuova sfida!"
+                f"{final_stats}{elo_section}\n\nUsa /nuovapartita per una nuova sfida!"
             )
-            await db.finish_game(game["id"], winners[0]["player_id"])
         else:
             text += "\n\nUsa /mano per la prossima mano."
 
@@ -1173,6 +1212,7 @@ async def cmd_finegioco(update: Update, context: ContextTypes.DEFAULT_TYPE):
     winners      = [p for p in players if p["total_score"] == max_score]
     players_info = {p["player_id"]: p["players"]["display_name"] for p in players}
     await db.finish_game(game["id"], winners[0]["player_id"])
+    elo_text = await _apply_and_format_elo(game["id"], players)
 
     game_num = game["id"]
     lines = [f"🏁 *Partita #{game_num} terminata!*\n"]
@@ -1181,12 +1221,13 @@ async def cmd_finegioco(update: Update, context: ContextTypes.DEFAULT_TYPE):
         score = p["total_score"]
         bar   = _progress_bar(score, game["target_score"])
         lines.append(f"{i}. {name}: *{score}* pt  `{bar}`")
-    
+
     w_names = ", ".join([w["players"]["display_name"] for w in winners])
     lines.append(f"\n🏆 {'Vincitore' if len(winners) == 1 else 'Vincitori'}: *{w_names}*!")
 
-    final_stats = await _build_final_stats(game, players_info)
-    text = "\n".join(lines) + final_stats + "\n\nUsa /nuovapartita per una nuova sfida!"
+    final_stats  = await _build_final_stats(game, players_info)
+    elo_section  = f"\n\n{elo_text}" if elo_text else ""
+    text = "\n".join(lines) + final_stats + elo_section + "\n\nUsa /nuovapartita per una nuova sfida!"
     await update.message.reply_text(text, parse_mode="Markdown")
 
 async def cmd_annulla_partita(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1242,6 +1283,64 @@ async def cancel_game_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             await query.edit_message_text(SUCCESS_GAME_CANCELLED, parse_mode="Markdown")
         else:
             await query.edit_message_text("❌ Errore durante l'eliminazione dal database.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# /elo
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def cmd_elo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat      = update.effective_chat
+    is_global = bool(context.args and context.args[0].lower() == "globale")
+
+    if is_global:
+        ranking = await db.get_elo_ranking()
+        title   = "🌍 *ELO RANKING GLOBALE BURRACO*"
+    else:
+        ranking = await db.get_elo_ranking(chat.id)
+        title   = "⭐ *ELO RANKING — questo gruppo*"
+
+    if not ranking:
+        msg = "Nessuna partita conclusa ancora! 🃏"
+        if not is_global:
+            msg += "\n_Usa /elo globale per le statistiche globali._"
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        return
+
+    text = title + "\n\n"
+    text += "```\n"
+    text += f"{'Pos':<4}{'Nome':<20}{'ELO':<7}{'P':<3}\n"
+    text += "─" * 34 + "\n"
+    for i, row in enumerate(ranking):
+        pos  = f"{i+1}."
+        name = row["display_name"][:19]
+        text += f"{pos:<4}{name:<20}{row['elo']:<7}{row['games_played']:<3}\n"
+    text += "```\n"
+
+    text += "\n_ELO parte da 1000 | P: Partite giocate_"
+    if not is_global:
+        text += "\n_/elo globale per la classifica globale._"
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# /recalcolaelo  (solo admin)
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def cmd_recalcola_elo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user     = update.effective_user
+    admin_id = int(os.getenv("ADMIN_USER_ID", "0"))
+    if not admin_id or user.id != admin_id:
+        await update.message.reply_text("❌ Comando riservato all'amministratore.")
+        return
+
+    msg = await update.message.reply_text("⏳ Ricalcolo ELO in corso su tutte le partite...")
+    try:
+        await db.recalculate_all_elo()
+        await msg.edit_text("✅ Ricalcolo ELO completato! Usa /elo per vedere i risultati.")
+    except Exception as e:
+        logger.error(f"Errore nel ricalcolo ELO: {e}", exc_info=True)
+        await msg.edit_text(f"❌ Errore durante il ricalcolo: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1311,6 +1410,8 @@ def main():
     app.add_handler(CommandHandler("pausa",        cmd_pausa))
     app.add_handler(CommandHandler("riprendi",     cmd_riprendi))
     app.add_handler(CommandHandler("classifica",   cmd_classifica))
+    app.add_handler(CommandHandler("elo",          cmd_elo))
+    app.add_handler(CommandHandler("recalcolaelo", cmd_recalcola_elo))
     app.add_handler(CommandHandler("annullapartita", cmd_annulla_partita))
     app.add_handler(CommandHandler("finegioco",    cmd_finegioco))
     app.add_handler(CallbackQueryHandler(numpad_callback, pattern="^mp:"))

@@ -439,6 +439,147 @@ class Database:
         res = await self.client.rpc("classifica_coppie_gruppo", {"p_chat_id": chat_id}).execute()
         return self._list(res)
 
+    # ── ELO ───────────────────────────────────────────────────────────────────
+
+    async def get_player_elo_data(self, player_ids: list[int]) -> dict[int, dict]:
+        """Returns {player_id: {"elo": int, "games_played": int}} for given players."""
+        from config import ELO_DEFAULT
+        if not player_ids:
+            return {}
+        res = await (
+            self.client.table("player_elo")
+            .select("player_id, elo, games_played")
+            .in_("player_id", player_ids)
+            .execute()
+        )
+        result: dict[int, dict] = {
+            row["player_id"]: {"elo": row["elo"], "games_played": row["games_played"]}
+            for row in self._list(res)
+        }
+        for pid in player_ids:
+            if pid not in result:
+                result[pid] = {"elo": ELO_DEFAULT, "games_played": 0}
+        return result
+
+    async def apply_elo_updates(
+        self,
+        game_id: int,
+        deltas: dict[int, int],
+        elo_data_before: dict[int, dict],
+    ) -> None:
+        """Persist ELO changes: insert history rows and upsert current ELO."""
+        if not deltas:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        history_rows = [
+            {
+                "player_id":  pid,
+                "game_id":    game_id,
+                "elo_before": elo_data_before[pid]["elo"],
+                "elo_after":  elo_data_before[pid]["elo"] + delta,
+                "delta":      delta,
+                "created_at": now,
+            }
+            for pid, delta in deltas.items()
+        ]
+        await self.client.table("elo_history").insert(history_rows).execute()
+        for pid, delta in deltas.items():
+            new_elo   = elo_data_before[pid]["elo"] + delta
+            new_games = elo_data_before[pid]["games_played"] + 1
+            await (
+                self.client.table("player_elo")
+                .upsert(
+                    {"player_id": pid, "elo": new_elo, "games_played": new_games, "updated_at": now},
+                    on_conflict="player_id",
+                )
+                .execute()
+            )
+
+    async def get_elo_ranking(self, chat_id: int | None = None) -> list[dict]:
+        """Returns ELO leaderboard (top 10). Filters to group players if chat_id is given."""
+        if chat_id is None:
+            res = await (
+                self.client.table("classifica_elo")
+                .select("*")
+                .limit(10)
+                .execute()
+            )
+            return self._list(res)
+
+        games_res = await (
+            self.client.table("games")
+            .select("id")
+            .eq("chat_id", chat_id)
+            .eq("status", "finished")
+            .execute()
+        )
+        if not games_res.data:
+            return []
+        game_ids = [g["id"] for g in games_res.data]
+
+        gp_res = await (
+            self.client.table("game_players")
+            .select("player_id")
+            .in_("game_id", game_ids)
+            .execute()
+        )
+        if not gp_res.data:
+            return []
+        player_ids = list({row["player_id"] for row in gp_res.data})
+
+        res = await (
+            self.client.table("classifica_elo")
+            .select("*")
+            .in_("telegram_id", player_ids)
+            .limit(10)
+            .execute()
+        )
+        return self._list(res)
+
+    async def recalculate_all_elo(self) -> None:
+        """Reset and recompute all ELO from scratch using full game history in chronological order."""
+        from elo import calculate_elo_deltas
+
+        await self.client.table("elo_history").delete().neq("id", 0).execute()
+        await self.client.table("player_elo").delete().neq("player_id", 0).execute()
+
+        games_res = await (
+            self.client.table("games")
+            .select("id, finished_at")
+            .eq("status", "finished")
+            .order("finished_at")
+            .execute()
+        )
+        if not games_res.data:
+            self.logger.info("Nessuna partita finita trovata per il ricalcolo ELO.")
+            return
+
+        for game in games_res.data:
+            gid = game["id"]
+            players_res = await (
+                self.client.table("game_players")
+                .select("player_id, total_score")
+                .eq("game_id", gid)
+                .execute()
+            )
+            if not players_res.data:
+                continue
+            player_ids    = [p["player_id"] for p in players_res.data]
+            elo_data      = await self.get_player_elo_data(player_ids)
+            players_input = [
+                {
+                    "player_id":   p["player_id"],
+                    "total_score": p["total_score"],
+                    "elo":         elo_data[p["player_id"]]["elo"],
+                    "games_played": elo_data[p["player_id"]]["games_played"],
+                }
+                for p in players_res.data
+            ]
+            deltas = calculate_elo_deltas(players_input)
+            await self.apply_elo_updates(gid, deltas, elo_data)
+
+        self.logger.info(f"✅ Ricalcolo ELO completato: {len(games_res.data)} partite elaborate.")
+
     # ── Pulizia dati ──────────────────────────────────────────────────────
 
     async def delete_all_data_except_players(self):
